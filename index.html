@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FORTNITE LITE</title>
+<style>
+  :root { --gold:#ffd24a; --blue:#3fb8ff; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; overflow:hidden; background:#0b0f1a;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color:#fff; }
+  canvas { position:absolute; inset:0; width:100%; height:100%; display:block; }
+  #hud { pointer-events:none; }
+  .screen { position:absolute; inset:0; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; gap:18px; text-align:center;
+    background:linear-gradient(180deg, rgba(6,10,22,.45), rgba(6,10,22,.78));
+    backdrop-filter: blur(5px); z-index:10; }
+  #endScreen { background:radial-gradient(circle at 50% 30%, rgba(40,80,160,.55), rgba(6,8,16,.94) 70%); }
+  h1 { font-size:clamp(38px,7vw,86px); margin:0; letter-spacing:.06em; font-weight:900;
+       background:linear-gradient(180deg,#fff,#7fd8ff); -webkit-background-clip:text;
+       background-clip:text; color:transparent; text-shadow:0 6px 30px rgba(60,150,255,.35); }
+  h2 { font-size:clamp(28px,5vw,58px); margin:0; font-weight:900; letter-spacing:.05em; }
+  p.sub { margin:0; opacity:.75; font-size:15px; letter-spacing:.14em; text-transform:uppercase; }
+  button { font:800 17px system-ui, sans-serif; letter-spacing:.1em; padding:14px 46px;
+    border:0; border-radius:6px; cursor:pointer; color:#04121f;
+    background:linear-gradient(180deg,#8ee2ff,#2ea7e6); box-shadow:0 6px 0 #14618c, 0 12px 30px rgba(0,0,0,.5); }
+  button:active { transform:translateY(4px); box-shadow:0 2px 0 #14618c; }
+  .keys { display:grid; grid-template-columns:repeat(2,minmax(230px,1fr)); gap:6px 34px;
+    font-size:13.5px; max-width:760px; margin-top:6px; }
+  .keys div { display:flex; justify-content:space-between; gap:14px;
+    border-bottom:1px solid rgba(255,255,255,.10); padding:5px 2px; }
+  .keys b { color:var(--gold); font-weight:700; white-space:nowrap; }
+  .keys span { opacity:.8; }
+  .note { font-size:12px; opacity:.5; max-width:640px; line-height:1.5; }
+  .tabs { display:flex; gap:8px; margin-top:2px; }
+  .tabs button { font:700 12px system-ui,sans-serif; letter-spacing:.12em; padding:7px 18px;
+    border-radius:4px; background:rgba(255,255,255,.10); color:#cfe6ff; box-shadow:none; }
+  .tabs button[aria-selected="true"] { background:linear-gradient(180deg,#8ee2ff,#2ea7e6); color:#04121f; }
+  .keys.pad b { color:var(--blue); }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<canvas id="hud"></canvas>
+
+<div class="screen" id="menu">
+  <h1>FORTNITE LITE</h1>
+  <p class="sub">24 players · build · storm · last one standing</p>
+  <button id="playBtn">DROP IN</button>
+  <div class="tabs" id="ctrlTabs">
+    <button id="tabKb" aria-selected="true">KEYBOARD</button>
+    <button id="tabPad" aria-selected="false">CONTROLLER · BUILDER PRO</button>
+  </div>
+  <div class="keys" id="keysKb">
+    <div><span>Move / Sprint (toggle)</span><b>WASD / Shift</b></div>
+    <div><span>Build mode on / off</span><b>Q</b></div>
+    <div><span>Jump</span><b>Space</b></div>
+    <div><span>Wall · Floor · Ramp · Cone</span><b>Z X C V</b></div>
+    <div><span>Fire / Place · Aim</span><b>Mouse 1 · Mouse 2</b></div>
+    <div><span>Cycle material</span><b>T</b></div>
+    <div><span>Reload</span><b>R</b></div>
+    <div><span>Inventory slots</span><b>1–5 / Wheel</b></div>
+    <div><span>Take what you're aiming at, open chests</span><b>E</b></div>
+    <div><span>Drop held item</span><b>G</b></div>
+    <div><span>First / third person</span><b>P</b></div>
+    <div><span>Drop 30 ammo</span><b>Shift + G</b></div>
+  </div>
+  <div class="keys pad" id="keysPad" style="display:none">
+    <div><span>Move / Sprint (toggle)</span><b>L stick / L3</b></div>
+    <div><span>Build mode on / off</span><b>B ○</b></div>
+    <div><span>Look / First-third person</span><b>R stick / R3</b></div>
+    <div><span>In build: Stairs · Wall</span><b>LT · RT</b></div>
+    <div><span>Jump</span><b>A ✕</b></div>
+    <div><span>In build: Triangle · Floor</span><b>LB · RB</b></div>
+    <div><span>Fire · Aim (in combat)</span><b>RT · LT</b></div>
+    <div><span>Place: press that piece again (hold = turbo)</span><b>LT RT LB RB</b></div>
+    <div><span>Take what you're aiming at · Reload</span><b>X □</b></div>
+    <div><span>Rotate piece (in build)</span><b>X □</b></div>
+    <div><span>Prev / next weapon (in combat)</span><b>LB · RB</b></div>
+    <div><span>Pickaxe</span><b>Y △</b></div>
+    <div><span>Cycle material</span><b>D-pad ←</b></div>
+    <div><span>Prev / next weapon</span><b>D-pad ↓ · ↑</b></div>
+    <div><span>Drop held item</span><b>D-pad →</b></div>
+    <div><span>Start / play again</span><b>Start / A</b></div>
+    <div><span>Aim assist</span><b>on near a target</b></div>
+  </div>
+  <p class="note">Harvest wood, brick and metal by swinging the pickaxe (slot 1) at trees, rocks,
+  cars and any structure. Every build piece costs 10 mats and can be shot down. Only materials are
+  collected by walking over them — point at a gun, ammo or a heal and press E / X to take it.
+  Sprint toggles on and off and is double walking speed. Aiming in nudges the crosshair toward a nearby enemy. Stay ahead of the purple storm. Esc releases the mouse.
+  A controller is picked up automatically — press any button and it takes over; the mouse is never
+  grabbed while a pad is in use.</p>
+</div>
+
+<div class="screen" id="endScreen" style="display:none">
+  <h2 id="endTitle">ELIMINATED</h2>
+  <p class="sub" id="endSub"></p>
+  <button id="againBtn">PLAY AGAIN</button>
+  <p class="note">Enter restarts — or Start / A on a controller.</p>
+</div>
+
+<script src="engine.js"></script>
+<script src="models.js"></script>
+<script src="anim.js"></script>
+<script src="textures.js"></script>
+<script src="world.js"></script>
+<script src="game.js"></script>
+</body>
+</html>

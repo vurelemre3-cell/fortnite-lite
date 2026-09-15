@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>gl test</title>
+<style>body{margin:0;background:#000}canvas{display:block}pre{position:absolute;left:8px;top:8px;color:#fff;font:12px monospace;background:rgba(0,0,0,.5);padding:6px;margin:0}</style></head>
+<body>
+<canvas id="gl" width="1280" height="720"></canvas>
+<pre id="out">running</pre>
+<script src="../engine.js"></script>
+<script src="../models.js"></script>
+<script src="../anim.js"></script>
+<script src="../textures.js"></script>
+<script>
+// Renderer smoke test + look check: a lit terrain patch, textured build pieces,
+// props, and an animated character, framed by ?cx&cy&cz&yaw&pitch&anim&t.
+// Headless Chrome screenshots this page; the <pre> and <title> carry the result.
+const q = new URLSearchParams(location.search);
+const num = (k, d) => q.has(k) ? parseFloat(q.get(k)) : d;
+const log = [];
+const say = s => { log.push(s); document.getElementById('out').textContent = log.join('\n'); };
+(async () => {
+  const canvas = document.getElementById('gl');
+  let R;
+  try { R = new Renderer(canvas); say('OK   renderer + 7 programs'); }
+  catch (e) { say('FAIL ' + e.message); return done(); }
+  R.resize = () => {};
+  const T = Textures.build(R);
+  const wood = R.addTextured(MESH_CUBE, T.wood, 0.5, 0.05), brick = R.addTextured(MESH_CUBE, T.brick, 0.5, 0.05), metal = R.addTextured(MESH_CUBE, T.metal, 0.5, 0.5);
+  const woodRamp = R.addTextured(MESH_RAMP, T.wood, 0.5, 0.05), brickCone = R.addTextured(MESH_CONE, T.brick, 0.5, 0.05);
+
+  // terrain: 160 m patch, gentle hills, smooth normals
+  const H = (x, z) => Math.sin(x * 0.05) * 3 + Math.cos(z * 0.07 + 1) * 2.5 + Math.sin((x + z) * 0.13) * 0.6;
+  const verts = [], n = 40, s = 4, off = -80;
+  const N = (x, z) => { const e = 0.5; const dx = (H(x + e, z) - H(x - e, z)) / (2 * e), dz = (H(x, z + e) - H(x, z - e)) / (2 * e); const l = Math.hypot(dx, 1, dz); return [-dx / l, 1 / l, -dz / l]; };
+  const V = (x, z) => { const nn = N(x, z); return [x, H(x, z), z, nn[0], nn[1], nn[2]]; };
+  for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+    const x0 = off + i * s, z0 = off + j * s, a = V(x0, z0), b = V(x0 + s, z0), c = V(x0 + s, z0 + s), d = V(x0, z0 + s);
+    verts.push(...a, ...b, ...c, ...a, ...c, ...d);
+  }
+  R.setTerrain([{ verts }]);
+  R._half = 80;
+  const sp = new Uint8Array(64 * 64 * 4);
+  for (let y = 0; y < 64; y++) for (let x = 0; x < 64; x++) { const i = (y * 64 + x) * 4; const road = Math.abs(x - 32 + Math.sin(y * 0.3) * 3) < 2.5 ? 255 : 0; sp[i] = road; sp[i + 3] = 255; }
+  R.setSplat(sp, 64); R.setHeightRange(-6, 6);
+
+  Assets.init(R);
+  const want = (q.get('models') || 'char_knight,tree_a,rock_e,car_taxi,chest,streetlight,watertower').split(',');
+  const manifest = {};
+  for (const m of want) manifest[m] = m.startsWith('char_') ? { url: '../assets/' + m + '.glb', skipNodes: '^handslot\\.' } : '../assets/' + m + '.glb';
+  await Assets.loadAll(manifest);
+  if (Assets.errors.length) say('FAIL ' + Assets.errors.join(' | '));
+  for (const m of want) { const mm = Assets.get(m); say((mm ? 'OK   ' : 'FAIL ') + m.padEnd(14) + (mm ? ' parts=' + mm.parts.length + ' tris=' + mm.tris + ' h=' + mm.h.toFixed(2) + ' by=' + mm.by.toFixed(2) + ' w=' + mm.w.toFixed(2) + ' d=' + mm.d.toFixed(2) + (mm.skinned ? ' joints=' + mm.rig.palette.length + ' clips=' + Object.keys(mm.rig.clips).length : '') : '')); }
+
+  const chr = Assets.get('char_knight');
+  let anim = null, xf = new Float32Array(16);
+  if (chr) {
+    anim = new Animator(chr.rig);
+    say('     nodes: ' + chr.rig.nodes.map(n => n.name).filter(nm => /hips|spine|chest|head|handslot|root/.test(nm)).join(' '));
+    anim.play(q.get('anim') || 'Idle', 0, true);
+    anim.time = num('t', 0.4);
+  }
+  const cx = num('cx', 4), cy = num('cy', 3), cz = num('cz', 9), yaw = num('yaw', 0.35), pitch = num('pitch', -0.18);
+  const charYaw = num('cyaw', 0);
+
+  const frame = (tm) => {
+    R.time = tm;
+    R.begin(cx, cy, cz, yaw, pitch, 1.25);
+    R.drawTerrain();
+    const g = H(0, 0);
+    // a small build: two walls, a floor, a ramp, a cone — 4 m grid
+    R.push(wood, -2, g + 2, -6, 0, 0, 4, 4, 0.32, 1, 1, 1, 1);
+    R.push(brick, 2, g + 2, -6, 0, 0, 4, 4, 0.32, 1, 1, 1, 1);
+    R.push(metal, -4, g + 2, -4, 0, 0, 0.32, 4, 4, 1, 1, 1, 1);
+    R.push(wood, 0, g + 3.85, -4, 0, 0, 4, 0.3, 4, 1, 1, 1, 1);
+    R.push(woodRamp, 4, g + 2, 0, Math.PI / 2, 0, 4, 4, 4, 1, 1, 1, 1);
+    R.push(brickCone, -4, g + 4 + 1, -4, 0, 0, 4, 2, 4, 1, 1, 1, 1);
+    R.push(MESH_SPHERE, 6, g + 1, 4, 0, 0, 1.2, 1.2, 1.2, 0.9, 0.3, 0.3, 1);
+    R.push(MESH_TUBE, 7, g + 0.5, 6, 0.4, 0.2, 0.3, 0.3, 1.4, 0.3, 0.3, 0.35, 1);
+    R.box(2, g + 0.5, 3, 1, 1, 1, [0.35, 1.0, 0.45], 0, 0.4);   // ghost
+    const place = (name, x, z, h, rot) => { const m = Assets.get(name); if (m) R.pushModel(m, x, H(x, z), z, rot || 0, h, 1, 1, 1, 1); };
+    place('tree_a', -9, -2, 8.2, 0.3); place('tree_a', 9, -9, 7.5, 1.1); place('rock_e', -7, 6, 2.0, 0.8);
+    place('car_taxi', 8, -4, 1.9, 0.6); place('chest', 0, 3, 1.1, 0); place('streetlight', -6, 2, 5.0, 0); place('watertower', 18, -18, 14, 0);
+    if (chr && anim) {
+      const up = q.get('upper') ? { name: q.get('upper'), time: 0.4, weight: 1, mask: rigMask(chr.rig, 'spine'), loop: true } : null;
+      if (up) say('     upper layer ' + up.name + ' mask nodes=' + up.mask.reduce((s, v) => s + v, 0));
+      anim.evalPose(up);
+      const joints = anim.finish();
+      const sc = 1.85 / chr.h;
+      m4Place(xf, 1, H(1, 1) - chr.by * sc, 1, charYaw, sc);
+      R.pushSkinned(chr, xf, joints, 1, 1, 1, 1);
+      // a marker on the right hand slot, to check attachment maths
+      const hs = chr.rig.names['handslot.r'];
+      if (hs !== undefined) {
+        const w = anim.nodeWorld(hs);
+        const px = xf[0] * w[12] + xf[4] * w[13] + xf[8] * w[14] + xf[12];
+        const py = xf[1] * w[12] + xf[5] * w[13] + xf[9] * w[14] + xf[13];
+        const pz = xf[2] * w[12] + xf[6] * w[13] + xf[10] * w[14] + xf[14];
+        R.box(px, py, pz, 0.12, 0.12, 0.12, [1, 0.1, 0.9]);
+        // slot axes: X red, Y green, Z blue, 0.5 m long (world matrix columns, scaled by xf)
+        const ax = [[w[0], w[1], w[2], [1, 0, 0]], [w[4], w[5], w[6], [0, 1, 0]], [w[8], w[9], w[10], [0, 0.3, 1]]];
+        for (const [vx, vy, vz, col] of ax) {
+          const l = Math.hypot(vx, vy, vz) || 1;
+          const ex = px + (xf[0] * vx + xf[4] * vy + xf[8] * vz) / l * 0.5 / sc, ey = py + (xf[1] * vx + xf[5] * vy + xf[9] * vz) / l * 0.5 / sc, ez = pz + (xf[2] * vx + xf[6] * vy + xf[10] * vz) / l * 0.5 / sc;
+          R.line(px, py, pz, ex, ey, ez, 0.04, col, 1);
+          R.box(ex, ey, ez, 0.09, 0.09, 0.09, col);
+        }
+      }
+    }
+    R.end();
+  };
+  for (let i = 0; i < 3; i++) frame(i * 0.016 + 10);
+  const gl = R.gl, err = gl.getError();
+  say((err ? 'FAIL glError ' + err : 'OK   no GL error') + '  calls=' + R.drawCalls + ' inst=' + R.instances);
+  const w = canvas.width, h = canvas.height, buf = new Uint8Array(w * h * 4);
+  gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+  let dark = 0; for (let i = 0; i < buf.length; i += 4) if (buf[i] + buf[i + 1] + buf[i + 2] < 24) dark++;
+  say((dark / (w * h) < 0.5 ? 'OK   ' : 'FAIL ') + (100 * dark / (w * h)).toFixed(1) + '% dark pixels');
+  done();
+})().catch(e => { say('FAIL threw: ' + e.message + '\n' + (e.stack || '').split('\n').slice(0, 3).join('\n')); done(); });
+function done() {
+  const bad = log.filter(l => l.indexOf('FAIL') >= 0);
+  say(bad.length ? 'RESULT ' + bad.length + ' PROBLEM(S)' : 'RESULT ALL PASSED');
+  document.title = bad.length ? 'FAILED' : 'PASSED';
+  if (q.get('hide')) document.getElementById('out').style.display = 'none';
+}
+</script>
+</body></html>

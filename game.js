@@ -1,0 +1,2408 @@
+'use strict';
+/* =============================================================================
+   fortnite-lite / game.js
+   Match flow (drop -> loot -> build -> storm -> last one standing), player,
+   bots, combat, building, characters + animation, HUD.
+   ============================================================================= */
+
+const PLAYER_COUNT = 24;
+const BOT_NAMES = ['Vex', 'Nomad', 'Ghostly', 'Raven', 'Tilted', 'Zen', 'Kayo', 'Bolt', 'Mako', 'Juno',
+  'Ash', 'Riptide', 'Quill', 'Drift', 'Sable', 'Onyx', 'Kite', 'Volt', 'Nyx', 'Cinder',
+  'Pike', 'Wren', 'Slate', 'Fen', 'Bramble', 'Halo', 'Torque', 'Lynx'];
+
+const STORM_PHASES = [
+  { wait: 35, shrink: 50, r: 0.62, dps: 1 },
+  { wait: 30, shrink: 45, r: 0.40, dps: 2 },
+  { wait: 25, shrink: 42, r: 0.25, dps: 5 },
+  { wait: 20, shrink: 36, r: 0.14, dps: 8 },
+  { wait: 16, shrink: 30, r: 0.06, dps: 10 },
+  { wait: 12, shrink: 60, r: 0.00, dps: 12 },
+];
+
+const BUILD_TYPES = ['wall', 'floor', 'ramp', 'cone'];
+const CHAR_SKINS = ['char_knight', 'char_barbarian', 'char_mage', 'char_rogue', 'char_rogue_hooded'];
+
+// Time-to-kill. The point of a Fortnite fight is that it lasts: you trade shots,
+// you build, you heal, you re-peek. Everything here scales damage down so a single
+// burst can't end an engagement — see also BOT_SHIELD and the bot burst pauses.
+const TTK = 0.68;          // global damage scale, both directions
+const BOT_DMG = 0.46;      // extra reduction on top of TTK for incoming bot fire
+const HEAD_MUL = 1.6;      // headshot multiplier
+const BOT_SHIELD = 60;     // bots spawn with up to this much shield, so they take work to drop
+
+const WALK_SPEED = 7.2;    // sprint (L3 / Shift) is exactly double this
+
+const G = {
+  state: 'menu',            // menu | drop | play | dead | win
+  t: 0, dt: 0,
+  ents: [], player: null,
+  storm: null,
+  tracers: [], dmgNums: [], feed: [], parts: [],
+  hitMark: 0, critMark: 0, elimFlash: 0, hurtFlash: 0,
+  alive: 0, placement: 0,
+  msg: '', msgT: 0,
+  firstPerson: false,
+  paused: false,
+  aimAssist: true,          // see padLook() and mouseAssist()
+  bus: null, mini: null, menuT: 0,
+};
+
+let R = null, hudCv = null, hud = null;
+let TEX = null;               // procedural textures (textures.js)
+let PIECE_MESH = null;        // [mat] -> { cube, ramp, cone } textured mesh ids
+let ITEM_MESH = null;         // { ammo, medkit, bus }
+const _v = [0, 0, 0], _scr = [0, 0];
+// separate scratch vectors — buildPlan, the camera and the aim assist all want a
+// direction at the same time and must not scribble on each other's
+const _av = [0, 0, 0], _bv = [0, 0, 0], _cv = [0, 0, 0], _camv = [0, 0, 0];
+
+/* ------------------------------- entities ---------------------------------- */
+
+function makeEntity(isBot, name, color, skin) {
+  return {
+    isBot, name, color, skin,
+    pos: [0, 0, 0], vel: [0, 0, 0],
+    yaw: 0, pitch: 0,
+    hp: 100, shield: 0, alive: true, deadT: 0,
+    grounded: false, sprint: false, onRamp: false,
+    mats: [0, 0, 0], ammo: { light: 0, medium: 0, shells: 0 },
+    inv: [{ id: 'pickaxe', rar: 0, mag: 0 }, null, null, null, null],
+    slot: 0, kills: 0,
+    fireT: 0, reloadT: 0, swingT: 0, useT: 0, useKind: null, useSlot: 0,
+    buildMode: false, buildType: 0, buildRot: 0, buildMat: MAT_WOOD, buildT: 0, buildArm: -1, buildKey: null,
+    recoil: 0, hurtT: 0, muzzleT: 0,
+    // animation
+    anim: null, upper: null, xf: new Float32Array(16), animPhase: Math.random() * 3,
+    // bot brain
+    think: 0, target: null, wander: [0, 0], strafe: 1, strafeT: 0, stuckT: 0, wallT: 0, burst: 0, aimT: 0,
+    skill: 0.5, landing: null, glide: false,
+  };
+}
+
+function entEye(e) { return e.pos[1] + EYE_H; }
+function curItem(e) { return e.inv[e.slot]; }
+function curWeapon(e) { const it = curItem(e); return it ? WEAPONS[it.id] : null; }
+
+/* -------------------------------- match ------------------------------------ */
+
+function newMatch() {
+  World.ents = G.ents;
+  G.ents.length = 0; G.tracers.length = 0; G.dmgNums.length = 0; G.feed.length = 0; G.parts.length = 0;
+  const pois = generateWorld();
+  if (R) {   // R is null in headless harnesses
+    R.setTerrain(buildTerrainMesh());
+    const sp = buildSplat();
+    R.setSplat(sp.data, sp.size);
+    R._half = HALF;
+    R.setHeightRange(TERRAIN_MIN, TERRAIN_MAX);
+    G.mini = buildMinimap();
+  }
+  G.t = 0; G.placement = 0; G.msg = ''; G.msgT = 0;
+
+  const player = makeEntity(false, 'You', [0.30, 0.62, 0.95], 'char_knight');
+  player.mats = [50, 0, 0];
+  player.ammo = { light: 60, medium: 40, shells: 12 };
+  G.player = player;
+  G.ents.push(player);
+
+  const names = BOT_NAMES.slice();
+  for (let i = 1; i < PLAYER_COUNT; i++) {
+    const n = names.length ? names.splice((Math.random() * names.length) | 0, 1)[0] : 'Bot' + i;
+    const b = makeEntity(true, n, [rnd(0.35, 0.95), rnd(0.3, 0.9), rnd(0.35, 0.95)], pick(CHAR_SKINS));
+    b.skill = rnd(0.25, 0.85);
+    b.shield = Math.round(rnd(0, BOT_SHIELD));
+    b.mats = [rnd(60, 180) | 0, rnd(0, 80) | 0, 0];
+    // spread landings out — a whole lobby landing on one roof is a bloodbath
+    b.landing = Math.random() < 0.75 ? pick(pois) : { x: rnd(-HALF + 20, HALF - 20), z: rnd(-HALF + 20, HALF - 20) };
+    b.landing = { x: b.landing.x + rnd(-55, 55), z: b.landing.z + rnd(-55, 55) };
+    G.ents.push(b);
+  }
+
+  // battle-bus line across the map: everyone has just jumped, spread along the
+  // bus's path; the bus itself is ahead of the last jumper and flies on
+  const busA = rnd(0, Math.PI * 2);
+  const bx = Math.cos(busA), bz = Math.sin(busA);
+  const sx = -bx * HALF * 0.85, sz = -bz * HALF * 0.85;
+  for (let i = 0; i < G.ents.length; i++) {
+    const e = G.ents[i];
+    const s = e === player ? HALF * 0.9 : rnd(HALF * 0.2, HALF * 1.5);
+    e.pos[0] = clamp(sx + bx * s + rnd(-6, 6), -HALF + 20, HALF - 20);
+    e.pos[2] = clamp(sz + bz * s + rnd(-6, 6), -HALF + 20, HALF - 20);
+    e.pos[1] = rnd(150, 172);
+    e.vel[0] = bx * 22; e.vel[2] = bz * 22; e.vel[1] = -2;
+    e.yaw = Math.atan2(-bx, -bz);
+    e.glide = false;
+  }
+  G.bus = { x: sx + bx * HALF * 1.6, z: sz + bz * HALF * 1.6, y: 178, dx: bx, dz: bz, t: 0 };
+
+  G.storm = {
+    cx: rnd(-40, 40), cz: rnd(-40, 40), r: HALF * 1.45,
+    tcx: 0, tcz: 0, tr: HALF * 1.45,
+    phase: -1, timer: 4, shrinking: false, dps: 0, r0: HALF * 1.45, tickT: 0,
+  };
+  nextStormPhase();
+  G.alive = G.ents.length;
+  G.state = 'drop';
+  say(Input.padActive ? 'DROP IN — hold the left stick forward to dive' : 'DROP IN — hold W to dive');
+}
+
+function nextStormPhase() {
+  const s = G.storm;
+  s.phase++;
+  if (s.phase >= STORM_PHASES.length) { s.shrinking = false; s.timer = 9999; return; }
+  const ph = STORM_PHASES[s.phase];
+  s.dps = ph.dps;
+  s.tr = s.r0 * ph.r;
+  const move = Math.max(0, s.r - s.tr) * 0.75;
+  const a = rnd(0, Math.PI * 2), d = rnd(0, move);
+  s.tcx = clamp(s.cx + Math.cos(a) * d, -HALF + s.tr, HALF - s.tr);
+  s.tcz = clamp(s.cz + Math.sin(a) * d, -HALF + s.tr, HALF - s.tr);
+  s.timer = ph.wait; s.shrinking = false; s.shrinkDur = ph.shrink;
+  s.fromR = s.r; s.fromX = s.cx; s.fromZ = s.cz;
+}
+
+function updateStorm(dt) {
+  const s = G.storm;
+  s.timer -= dt;
+  if (s.timer <= 0) {
+    if (!s.shrinking) {
+      s.shrinking = true; s.timer = s.shrinkDur;
+      s.fromR = s.r; s.fromX = s.cx; s.fromZ = s.cz;
+      say('THE STORM IS CLOSING');
+    } else { s.r = s.tr; s.cx = s.tcx; s.cz = s.tcz; nextStormPhase(); }
+  }
+  if (s.shrinking) {
+    const k = 1 - clamp(s.timer / s.shrinkDur, 0, 1);
+    s.r = lerp(s.fromR, s.tr, k);
+    s.cx = lerp(s.fromX, s.tcx, k);
+    s.cz = lerp(s.fromZ, s.tcz, k);
+  }
+  s.tickT -= dt;
+  if (s.tickT <= 0) {
+    s.tickT = 1;
+    for (const e of G.ents) {
+      if (!e.alive) continue;
+      if (dist2(e.pos[0], e.pos[2], s.cx, s.cz) > s.r * s.r) applyDamage(e, s.dps, null, false, true);
+    }
+  }
+}
+
+function inStorm(x, z) { const s = G.storm; return dist2(x, z, s.cx, s.cz) > s.r * s.r; }
+
+/* -------------------------------- combat ----------------------------------- */
+
+function entBoxes(e) {
+  const [x, y, z] = e.pos;
+  return [
+    { minx: x - 0.40, maxx: x + 0.40, miny: y, maxy: y + 1.48, minz: z - 0.40, maxz: z + 0.40, head: false },
+    { minx: x - 0.28, maxx: x + 0.28, miny: y + 1.48, maxy: y + 1.95, minz: z - 0.28, maxz: z + 0.28, head: true },
+  ];
+}
+
+function rayEntities(ox, oy, oz, dx, dy, dz, maxT, ignore) {
+  let best = null, bestT = maxT;
+  for (const e of G.ents) {
+    if (!e.alive || e === ignore) continue;
+    if (Math.abs(e.pos[0] - ox) > maxT + 2 || Math.abs(e.pos[2] - oz) > maxT + 2) continue;
+    for (const b of entBoxes(e)) {
+      const t = rayAABB(ox, oy, oz, dx, dy, dz, b, bestT);
+      if (t >= 0 && t < bestT) { bestT = t; best = { t, ent: e, head: b.head }; }
+    }
+  }
+  return best;
+}
+
+function applyDamage(target, dmg, attacker, head, byStorm) {
+  if (!target.alive) return;
+  let d = dmg;
+  if (target.shield > 0) { const s = Math.min(target.shield, d); target.shield -= s; d -= s; }
+  target.hp -= d;
+  target.hurtT = 0.25;
+  if (!byStorm) playUpper(target, 'Hit_A', 0.45);
+  if (target === G.player) { G.hurtFlash = 0.35; Sfx.hurt(); }
+  if (attacker === G.player) {
+    G.hitMark = 0.14; if (head) G.critMark = 0.2;
+    Sfx.hit();
+    pushDamage(target.pos[0], target.pos[1] + 1.8, target.pos[2], Math.round(dmg), head);
+  }
+  if (target.hp <= 0) eliminate(target, attacker, byStorm);
+}
+
+function eliminate(e, attacker, byStorm) {
+  if (!e.alive) return;
+  e.alive = false; e.hp = 0; e.deadT = 0;
+  if (e.anim) e.anim.play('Death_A', 0.08, false, true);
+  e.upper = null;
+  G.alive--;
+  if (attacker && attacker !== e) attacker.kills++;
+  // everything they were carrying bursts out of them where they fell
+  const spill = [];
+  for (let i = 1; i < 5; i++) if (e.inv[i]) spill.push(e.inv[i]);
+  for (const it of spill) {
+    const kind = (it.id === 'shield' || it.id === 'medkit') ? it.id : 'weapon';
+    tossLoot(spawnLoot(kind, e.pos[0], e.pos[1] + 1.1, e.pos[2], { item: it }),
+      rnd(-3, 3), rnd(4.5, 7), rnd(-3, 3), 0.4);
+  }
+  tossLoot(spawnAmmoLoot(e.pos[0], e.pos[1] + 1.1, e.pos[2], pick(AMMO_TYPES), 45),
+    rnd(-3, 3), rnd(4.5, 7), rnd(-3, 3), 0.4);
+  for (let m = 0; m < 3; m++) {
+    if (e.mats[m] < 30) continue;
+    tossLoot(spawnLoot('mats', e.pos[0], e.pos[1] + 1.1, e.pos[2], { mat: m, n: Math.min(e.mats[m], 90) | 0 }),
+      rnd(-3, 3), rnd(4.5, 7), rnd(-3, 3), 0.4);
+  }
+  spawnParticles(e.pos[0], e.pos[1] + 1.0, e.pos[2], 18, [0.95, 0.35, 0.35], 5, 0.16, 0.7, 14);
+  addFeed(byStorm ? 'Storm' : (attacker ? attacker.name : '???'), e.name);
+
+  if (e === G.player) {
+    G.placement = G.alive + 1;
+    G.state = 'dead';
+    Sfx.elim();
+    if (document.pointerLockElement) document.exitPointerLock();
+  } else if (attacker === G.player) {
+    G.elimFlash = 1.2; Sfx.elim();
+    say('ELIMINATED ' + e.name);
+  }
+  if (G.state !== 'dead' && G.alive <= 1 && G.player.alive) {
+    G.state = 'win'; G.placement = 1; Sfx.win();
+    if (G.player.anim) G.player.anim.play('Cheer', 0.2, true);
+    if (document.pointerLockElement) document.exitPointerLock();
+  }
+}
+
+function pushDamage(x, y, z, val, crit) {
+  G.dmgNums.push({ x, y, z, val, crit, t: 0, life: 0.9, ox: rnd(-0.4, 0.4) });
+  if (G.dmgNums.length > 40) G.dmgNums.shift();
+}
+function addFeed(a, b) {
+  G.feed.unshift({ a, b, t: 5.5 });
+  if (G.feed.length > 5) G.feed.pop();
+}
+function say(text) { G.msg = text; G.msgT = 2.6; }
+
+/* ------------------------------- particles --------------------------------- */
+// Little cubes with gravity — impact sparks, wood chips, brick dust, build puffs.
+
+function spawnParticles(x, y, z, n, col, speed, size, life, grav) {
+  if (G.parts.length > 900) return;
+  for (let i = 0; i < n; i++) {
+    const a = rnd(0, Math.PI * 2), u = rnd(-1, 1), s = speed * rnd(0.3, 1);
+    const r = Math.sqrt(1 - u * u);
+    G.parts.push({
+      x, y, z, vx: r * Math.cos(a) * s, vy: (u * 0.5 + 0.6) * s, vz: r * Math.sin(a) * s,
+      col, size: size * rnd(0.6, 1.3), t: 0, life: life * rnd(0.6, 1.2), grav: grav === undefined ? 18 : grav,
+      spin: rnd(0, 6), yaw: rnd(0, 6),
+    });
+  }
+}
+function updateParticles(dt) {
+  const P = G.parts;
+  for (let i = P.length - 1; i >= 0; i--) {
+    const p = P[i];
+    p.t += dt;
+    if (p.t >= p.life) { P[i] = P[P.length - 1]; P.pop(); continue; }
+    p.vy -= p.grav * dt;
+    p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
+    p.yaw += p.spin * dt;
+    const g = terrainHeight(p.x, p.z);
+    if (p.y < g) { p.y = g; p.vy *= -0.3; p.vx *= 0.6; p.vz *= 0.6; }
+  }
+}
+function materialChips(col, x, y, z, n) {
+  spawnParticles(x, y, z, n, col, 4.5, 0.14, 0.6, 20);
+}
+
+// One shot (or one pellet volley). dirX/Y/Z must be normalised.
+function fireShot(e, ox, oy, oz, dx, dy, dz, dmg, range, tracerCol) {
+  const hitStatic = rayWorld(ox, oy, oz, dx, dy, dz, range);
+  const hitEnt = rayEntities(ox, oy, oz, dx, dy, dz, hitStatic ? hitStatic.t : range, e);
+  let end = hitStatic ? hitStatic.t : range;
+  if (hitEnt) {
+    end = hitEnt.t;
+    applyDamage(hitEnt.ent, dmg * (hitEnt.head ? HEAD_MUL : 1), e, hitEnt.head);
+    spawnParticles(ox + dx * end, oy + dy * end, oz + dz * end, 4, [0.9, 0.25, 0.25], 2.5, 0.09, 0.4, 12);
+  } else if (hitStatic) {
+    const c = hitStatic.col;
+    const hx = ox + dx * end, hy = oy + dy * end, hz = oz + dz * end;
+    if (c.kind === 'piece') { damagePiece(c.ref, dmg * 0.85, false); materialChips(MAT_COLOR[c.ref.mat], hx, hy, hz, 4); }
+    else if (c.kind === 'prop') { damageProp(c.ref, dmg * 0.8); materialChips(MAT_COLOR[c.ref.mat], hx, hy, hz, 4); }
+    else spawnParticles(hx, hy, hz, 3, [0.55, 0.45, 0.32], 2, 0.1, 0.4, 14);
+  }
+  G.tracers.push({
+    ax: ox, ay: oy, az: oz,
+    bx: ox + dx * end, by: oy + dy * end, bz: oz + dz * end,
+    t: 0.055, col: tracerCol
+  });
+  if (G.tracers.length > 120) G.tracers.shift();
+}
+
+function tryFire(e, aimX, aimY, aimZ) {
+  const it = curItem(e);
+  if (!it || e.fireT > 0 || e.reloadT > 0 || e.useT > 0) return false;
+  const w = WEAPONS[it.id];
+  if (w.melee) { swingPickaxe(e); return true; }
+  if (it.mag <= 0) { startReload(e); return false; }
+  it.mag--;
+  e.fireT = w.rate;
+  e.muzzleT = 0.05;
+  playUpper(e, it.id === 'pistol' ? '1H_Ranged_Shoot' : '2H_Ranged_Shoot', it.id === 'sniper' ? 0.6 : 0.3);
+  // shots leave the gun's muzzle, not the eye — the muzzle sits a little right and below
+  const gp = gunPoint(e);
+  const ox = gp[0], oy = gp[1], oz = gp[2];
+  const dmg = weaponDamage(it) * TTK * (e.isBot ? BOT_DMG : 1);
+  // bots are deliberately sloppy — full accuracy at 8 shots/sec is unsurvivable
+  const spread = w.spread * (e === G.player && e.ads ? 0.35 : 1) * (e.isBot ? (7 - e.skill * 4) : 1)
+    * (len2(e.vel[0], e.vel[2]) > 3 ? 1.7 : 1);
+  const pellets = w.pellets || 1;
+  const col = e === G.player ? [1.0, 0.95, 0.6] : [1.0, 0.55, 0.25];
+  for (let p = 0; p < pellets; p++) {
+    const sx = rnd(-spread, spread), sy = rnd(-spread, spread), sz = rnd(-spread, spread);
+    let dx = aimX + sx, dy = aimY + sy, dz = aimZ + sz;
+    const l = len3(dx, dy, dz); dx /= l; dy /= l; dz /= l;
+    fireShot(e, ox, oy, oz, dx, dy, dz, dmg, w.range, col);
+  }
+  if (e === G.player) {
+    e.recoil += w.melee ? 0 : (w.dmg > 80 ? 0.05 : 0.014);
+    Sfx.shoot(it.id);
+  } else if (dist2(e.pos[0], e.pos[2], G.player.pos[0], G.player.pos[2]) < 90 * 90) {
+    Sfx.shoot(it.id);
+  }
+  if (it.mag <= 0) startReload(e);
+  return true;
+}
+
+// Where an entity's held gun sits in the world (muzzle flashes, tracer origin).
+// Tracers from the eye look like they come out of the forehead in third person.
+function gunPoint(e) {
+  const rx = Math.cos(e.yaw), rz = -Math.sin(e.yaw), fx = -Math.sin(e.yaw), fz = -Math.cos(e.yaw);
+  _v[0] = e.pos[0] + rx * 0.28 + fx * 0.55; _v[1] = entEye(e) - 0.32 + Math.sin(e.pitch) * 0.5; _v[2] = e.pos[2] + rz * 0.28 + fz * 0.55;
+  return _v;
+}
+
+function startReload(e) {
+  const it = curItem(e);
+  if (!it || it.mag === undefined) return;
+  const w = WEAPONS[it.id];
+  if (!w.ammo || it.mag >= w.mag) return;
+  if (!e.isBot && e.ammo[w.ammo] <= 0) { say('OUT OF ' + w.ammo.toUpperCase() + ' AMMO'); return; }
+  e.reloadT = w.reload;
+  playUpper(e, it.id === 'pistol' ? '1H_Ranged_Reload' : '2H_Ranged_Reload', w.reload);
+}
+function finishReload(e) {
+  const it = curItem(e);
+  if (!it) return;
+  const w = WEAPONS[it.id];
+  if (!w.ammo) return;
+  if (e.isBot) { it.mag = w.mag; return; }
+  const need = w.mag - it.mag;
+  const have = Math.min(need, e.ammo[w.ammo]);
+  it.mag += have; e.ammo[w.ammo] -= have;
+}
+
+function swingPickaxe(e) {
+  e.fireT = WEAPONS.pickaxe.rate;
+  e.swingT = 0.28;
+  playUpper(e, '1H_Melee_Attack_Chop', 0.5);
+  Sfx.swing();
+  const dir = dirFrom(e.yaw, e.pitch, _v);
+  const ox = e.pos[0], oy = entEye(e), oz = e.pos[2];
+  const range = WEAPONS.pickaxe.range;
+  const hitEnt = rayEntities(ox, oy, oz, dir[0], dir[1], dir[2], range, e);
+  const hitStatic = rayWorld(ox, oy, oz, dir[0], dir[1], dir[2], range);
+  if (hitEnt && (!hitStatic || hitEnt.t < hitStatic.t)) {
+    applyDamage(hitEnt.ent, WEAPONS.pickaxe.dmg, e, hitEnt.head);
+    return;
+  }
+  if (!hitStatic) return;
+  const c = hitStatic.col;
+  let mats = 0, matType = MAT_WOOD;
+  if (c.kind === 'prop') { mats = damageProp(c.ref, WEAPONS.pickaxe.harvest); matType = c.ref.mat; }
+  else if (c.kind === 'piece') { mats = damagePiece(c.ref, WEAPONS.pickaxe.harvest, true); matType = c.ref.mat; }
+  else return;
+  const t = hitStatic.t;
+  materialChips(MAT_COLOR[matType], ox + dir[0] * t, oy + dir[1] * t, oz + dir[2] * t, 7);
+  if (mats > 0) {
+    e.mats[matType] = Math.min(999, e.mats[matType] + mats);
+    if (e === G.player) { Sfx.pickup(); pushDamage(ox + dir[0] * 2, oy + dir[1] * 2, oz + dir[2] * 2, mats, false); }
+  }
+}
+
+/* -------------------------------- building --------------------------------- */
+
+// Fortnite's placement rule, for players and bots alike. A piece goes on the
+// grid next to you in the direction you face — a wall on the first grid line in
+// front (skipping one you are standing on), a floor / ramp / cone in the tile in
+// front — at the storey your feet are on. Looking up builds a storey higher,
+// looking well down a storey lower; the manual rotation (R / X) turns the facing
+// a quarter at a time. If that storey has nothing to hold the piece, the storeys
+// either side are tried before giving up — and the ghost always shows the result.
+function buildPlan(e) {
+  const type = BUILD_TYPES[e.buildType];
+  const yaw = e.yaw - (e.buildRot & 3) * Math.PI / 2;
+  const fx = -Math.sin(yaw), fz = -Math.cos(yaw);
+  const alongX = Math.abs(fx) > Math.abs(fz);
+  const sx = fx > 0 ? 1 : -1, sz = fz > 0 ? 1 : -1;
+  const px = e.pos[0], pz = e.pos[2], feet = e.pos[1];
+  const pgx = Math.floor(px / GRID), pgz = Math.floor(pz / GRID);
+  const pitch = e === G.player ? e.pitch : 0;
+  // On a ramp the next piece continues from the top of it; otherwise a piece
+  // sits at the storey whose floor is at (or a step below) your feet.
+  let gy = (type === 'ramp' && e.onRamp) ? Math.round(feet / LEV) : Math.floor((feet + STEP_UP) / LEV);
+  if (pitch > 0.6) gy += 1; else if (pitch < -0.85) gy -= 1;
+  let plan;
+  if (type === 'wall') {
+    if (alongX) {
+      let line = sx > 0 ? Math.ceil(px / GRID) : Math.floor(px / GRID);
+      if (Math.abs(line * GRID - px) < ENT_R + 0.32) line += sx;
+      plan = { type, gx: line, gy, gz: pgz, rot: 3 };
+    } else {
+      let line = sz > 0 ? Math.ceil(pz / GRID) : Math.floor(pz / GRID);
+      if (Math.abs(line * GRID - pz) < ENT_R + 0.32) line += sz;
+      plan = { type, gx: pgx, gy, gz: line, rot: 0 };
+    }
+  } else {
+    let gx = pgx + (alongX ? sx : 0), gz = pgz + (alongX ? 0 : sz);
+    if (type !== 'ramp' && pitch < -1.05) { gx = pgx; gz = pgz; }   // straight down: under yourself
+    let rot = 0;
+    if (type === 'ramp') rot = alongX ? (sx < 0 ? 1 : 3) : (sz < 0 ? 0 : 2);
+    if (type === 'cone' && pitch > 0.35) gy += 1;
+    plan = { type, gx, gy, gz, rot };
+  }
+  if (canPlace(plan.type, plan.gx, plan.gy, plan.gz, plan.rot)) return plan;
+  // Already occupied is a real "no" — searching on from there would let a held
+  // turbo-build button run a tower straight up into the sky.
+  if (World.pieces.has(pieceKey(plan.type, plan.gx, plan.gy, plan.gz, plan.rot))) return plan;
+  for (const dy of [1, -1, 2]) {
+    const c = { type, gx: plan.gx, gy: plan.gy + dy, gz: plan.gz, rot: plan.rot };
+    if (canPlace(c.type, c.gx, c.gy, c.gz, c.rot)) return c;
+  }
+  return plan;      // nothing sticks — show the red ghost where it would have gone
+}
+
+function tryBuild(e) {
+  const plan = buildPlan(e);
+  if (e.mats[e.buildMat] < BUILD_COST) { if (e === G.player) say('NOT ENOUGH ' + MAT_NAME[e.buildMat].toUpperCase()); return false; }
+  if (!canPlace(plan.type, plan.gx, plan.gy, plan.gz, plan.rot)) return false;
+  const p = addPiece(plan.type, plan.gx, plan.gy, plan.gz, plan.rot, e.buildMat, e);
+  if (!p) return false;
+  p.born = G.t;
+  e.mats[e.buildMat] -= BUILD_COST;
+  e.buildT = 0.14;
+  playUpper(e, 'Interact', 0.3);
+  const [cx, cz] = tileCenter(plan.gx, plan.gz);
+  materialChips(MAT_COLOR[e.buildMat], cx, plan.gy * LEV + 0.5, cz, 6);
+  if (e === G.player || dist2(e.pos[0], e.pos[2], G.player.pos[0], G.player.pos[2]) < 60 * 60) Sfx.build();
+  return true;
+}
+
+/* --------------------------------- player ---------------------------------- */
+
+function updatePlayer(e, dt) {
+  // look — yaw is folded back into (-PI, PI] every frame. Left-turning raises it,
+  // so leaving it to accumulate meant it grew without bound over a match, and
+  // anything downstream doing angle arithmetic on it drifted out of range.
+  e.yaw = wrapAngle(e.yaw - Input.dx);
+  e.pitch = clamp(e.pitch - Input.dy, -1.5, 1.5);
+  if (Input.padActive) padLook(e, dt); else mouseAssist(e, dt);
+  if (e.recoil > 0) { e.pitch += e.recoil * 0.35; e.recoil *= 0.86; if (e.recoil < 0.001) e.recoil = 0; }
+  updateCamera(e, dt);
+
+  const fx = -Math.sin(e.yaw), fz = -Math.cos(e.yaw);
+  const rx = Math.cos(e.yaw), rz = -Math.sin(e.yaw);
+  let ix = Input.moveX, iz = Input.moveZ;
+  if (Input.down('KeyW')) iz += 1;
+  if (Input.down('KeyS')) iz -= 1;
+  if (Input.down('KeyD')) ix += 1;
+  if (Input.down('KeyA')) ix -= 1;
+  const len = len2(ix, iz);
+  if (len > 1) { ix /= len; iz /= len; }   // clamp, don't normalise — a half-tilted stick walks
+  const wishX = fx * iz + rx * ix, wishZ = fz * iz + rz * ix;
+
+  if (G.state === 'drop') { updateSkydive(e, dt, wishX, wishZ, true); return; }
+
+  // Sprint is a toggle: tap Shift (or click L3) to start, tap again to stop.
+  // Stopping still isn't automatic — standing still while toggled on just walks
+  // off at double speed again the moment you push a direction.
+  if (Input.hit('ShiftLeft') || Input.hit('ShiftRight')) e.sprint = !e.sprint;
+  const speed = (e.sprint ? WALK_SPEED * 2 : WALK_SPEED) * (e.useT > 0 ? 0.4 : 1);
+  const accel = e.grounded ? 60 : 14;
+  e.vel[0] += (wishX * speed - e.vel[0]) * Math.min(1, accel * dt);
+  e.vel[2] += (wishZ * speed - e.vel[2]) * Math.min(1, accel * dt);
+  if (e.grounded && Input.down('Space')) { e.vel[1] = 9.4; e.grounded = false; }
+  e.vel[1] -= 30 * dt;
+  const wasAir = !e.grounded;
+  moveEntity(e, dt);
+  if (wasAir && e.grounded && e.vel[1] <= 0) spawnParticles(e.pos[0], e.pos[1] + 0.1, e.pos[2], 5, [0.6, 0.55, 0.45], 1.8, 0.1, 0.35, 8);
+
+  // ---- inventory / mode switching ----
+  for (let i = 0; i < 5; i++) if (Input.hit('Digit' + (i + 1))) { e.slot = i; e.buildMode = false; e.reloadT = 0; e.useT = 0; }
+  // in build mode the wheel picks the piece, otherwise the inventory slot
+  if (Input.wheel) {
+    if (e.buildMode) e.buildType = (e.buildType + (Input.wheel > 0 ? 1 : 3)) % 4;
+    else cycleSlot(e, Input.wheel);
+  }
+  if (Input.hit('KeyQ')) e.buildMode = !e.buildMode;
+  // Keyboard Builder Pro: the piece key selects *and* places on the same press,
+  // and holding it turbo-builds — same rule as the pad shoulders.
+  const bindings = { KeyZ: 0, KeyX: 1, KeyC: 2, KeyV: 3 };
+  for (const k in bindings) {
+    if (Input.hit(k)) { e.buildMode = true; e.buildType = bindings[k]; e.buildKey = k; }
+    if (e.buildKey === k && Input.down(k) && e.buildMode && e.buildT <= 0) tryBuild(e);
+  }
+  if (e.buildKey && !Input.down(e.buildKey)) e.buildKey = null;
+  if (Input.hit('KeyT')) {
+    for (let i = 1; i <= 3; i++) { const m = (e.buildMat + i) % 3; if (e.mats[m] > 0 || i === 3) { e.buildMat = m; break; } }
+  }
+  if (Input.hit('KeyP')) G.firstPerson = !G.firstPerson;
+  if (Input.hit('KeyE')) interact(e);
+  if (Input.hit('KeyG')) { if (Input.down('ShiftLeft') || Input.down('ShiftRight')) dropAmmo(e); else dropHeld(e); }
+  if (Input.padActive) builderPro(e);
+
+  // ---- action ----
+  const padFireHeld = Input.padDown(PAD.RT) && !e.buildMode;
+  const padFireHit = Input.padHit(PAD.RT) && !e.buildMode;
+  e.ads = (Input.mouse[2] || Input.padDown(PAD.LT)) && !e.buildMode;
+  if (e.buildMode) {
+    if (Input.mouse[0] && e.buildT <= 0) tryBuild(e);
+    if (Input.hit('KeyR')) e.buildRot = (e.buildRot + 1) % 4;
+  } else {
+    const it = curItem(e);
+    if (it && (it.id === 'shield' || it.id === 'medkit')) {
+      if ((Input.clicked[0] || padFireHit) && e.useT <= 0) { e.useT = it.id === 'shield' ? 2.2 : 3.6; e.useKind = it.id; playUpper(e, 'Use_Item', e.useT); }
+    } else if (it) {
+      const w = WEAPONS[it.id];
+      const auto = it.id === 'ar' || it.id === 'smg';
+      if (auto ? (Input.mouse[0] || padFireHeld) : (Input.clicked[0] || padFireHit)) {
+        const aim = playerAimDir(e);
+        tryFire(e, aim[0], aim[1], aim[2]);
+      }
+      if (Input.hit('KeyR')) startReload(e);
+    }
+  }
+  if (e.useT > 0) {
+    e.useT -= dt;
+    if (e.useT <= 0) {
+      if (e.useKind === 'shield') e.shield = Math.min(100, e.shield + 50);
+      else e.hp = Math.min(100, e.hp + 100);
+      e.inv[e.slot] = null; e.useKind = null; Sfx.pickup();
+    }
+  }
+  autoPickup(e);
+}
+
+// Third-person shots must converge on the crosshair, so aim at whatever the
+// camera is looking at and fire from the body toward that point.
+function playerAimDir(e) {
+  const cam = cameraState(e);
+  const d = dirFrom(e.yaw, e.pitch, _aimv);
+  const hitS = rayWorld(cam.x, cam.y, cam.z, d[0], d[1], d[2], 300);
+  const hitE = rayEntities(cam.x, cam.y, cam.z, d[0], d[1], d[2], hitS ? hitS.t : 300, e);
+  const t = hitE ? hitE.t : (hitS ? hitS.t : 300);
+  const tx = cam.x + d[0] * t, ty = cam.y + d[1] * t, tz = cam.z + d[2] * t;
+  const gp = gunPoint(e);
+  let ax = tx - gp[0], ay = ty - gp[1], az = tz - gp[2];
+  const l = len3(ax, ay, az) || 1;
+  return [ax / l, ay / l, az / l];
+}
+
+function cycleSlot(e, dir) {
+  let s = e.slot;
+  for (let i = 0; i < 5; i++) { s = (s + (dir > 0 ? 1 : 4)) % 5; if (e.inv[s]) break; }
+  e.slot = s; e.buildMode = false;
+}
+
+/* ------------------------------- gamepad ----------------------------------- */
+
+// Fortnite's Builder Pro preset. B is the one door in and out of build mode; once
+// you are building, each of the four pieces owns a shoulder button — LT stairs,
+// RT wall, LB roof, RB floor — where the first press selects it, every press after
+// that places it, and holding it keeps placing (turbo build). No cycling, no
+// separate "place" button. In combat those same shoulders are Fire, Aim and weapon
+// cycling instead.
+const PAD_PIECES = [[PAD.RT, 0], [PAD.RB, 1], [PAD.LT, 2], [PAD.LB, 3]];   // wall floor stairs roof
+
+function builderPro(e) {
+  // A button only builds once it has been pressed *inside* build mode, so a press
+  // carried over from combat can't immediately slap down a piece as well.
+  if (e.buildArm >= 0 && !Input.padDown(e.buildArm)) e.buildArm = -1;
+
+  if (Input.padHit(PAD.B)) {
+    e.buildMode = !e.buildMode; e.buildArm = -1;
+    if (e.buildMode) { e.reloadT = 0; e.useT = 0; }
+  }
+
+  if (!e.buildMode) {
+    if (Input.padHit(PAD.LB)) cycleSlot(e, -1);
+    if (Input.padHit(PAD.RB)) cycleSlot(e, 1);
+  } else {
+    for (const [btn, type] of PAD_PIECES) {
+      // One press selects the piece *and* places it — waiting for a second tap is
+      // exactly the lag that loses a build fight. Holding still turbo-builds, and
+      // buildArm still means a trigger carried over from combat can't place: it
+      // takes a fresh press inside build mode to arm.
+      if (Input.padHit(btn)) { e.buildType = type; e.buildArm = btn; }
+      if (e.buildArm === btn && Input.padDown(btn) && e.buildT <= 0) tryBuild(e);
+    }
+    if (Input.padHit(PAD.X)) e.buildRot = (e.buildRot + 1) % 4;
+  }
+  if (Input.padHit(PAD.Y)) { e.slot = 0; e.buildMode = false; e.reloadT = 0; e.useT = 0; }   // pickaxe
+  if (Input.padHit(PAD.UP)) cycleSlot(e, 1);
+  if (Input.padHit(PAD.DOWN)) cycleSlot(e, -1);
+  if (!e.buildMode && Input.padHit(PAD.X)) {        // one contextual button, as on console
+    if (nearChest(e) || lookedAtLoot(e, PICKUP_RANGE)) interact(e);
+    else startReload(e);
+  }
+}
+
+// Right-stick look. A stick cannot match a mouse in a hitscan game, so a visible
+// enemy inside a narrow cone of the crosshair slows the stick down and pulls the
+// aim gently toward them — the same assist every console shooter ships.
+function padLook(e, dt) {
+  const tgt = (G.aimAssist && G.state === 'play' && !e.buildMode) ? assistTarget(e) : null;
+  // Slowdown only bites in proportion to how centred the target actually is, so a
+  // body at the edge of the cone never feels like the stick has gone heavy.
+  const near = tgt ? tgt.aim : 0;                       // 0 = edge of cone, 1 = dead centre
+  const slow = 1 - (1 - (e.ads ? 0.45 : 0.65)) * near;
+  e.yaw -= Input.lookX * slow * dt;
+  e.pitch = clamp(e.pitch - Input.lookY * slow * dt, -1.5, 1.5);
+  if (!tgt) return;
+
+  // Magnetism is measured from the player's *eye*, not the camera. The camera
+  // orbits with yaw, so a want-yaw derived from it moves as soon as the assist
+  // starts turning — a feedback loop that settles off-centre and then shoves back
+  // when you turn against it. That was the "I can't look left at people, it keeps
+  // kicking my view right" bug.
+  const ex = e.pos[0], ey = entEye(e), ez = e.pos[2];
+  const o = tgt.ent;
+  const flat = Math.sqrt(dist2(ex, ez, o.pos[0], o.pos[2]));
+  const wantYaw = Math.atan2(-(o.pos[0] - ex), -(o.pos[2] - ez));
+  const wantPitch = Math.atan2(entEye(o) - ey, flat);
+  const dyaw = angleDelta(e.yaw, wantYaw);
+
+  // Hands off the moment the stick is pushing away from them. e.yaw -= lookX, so
+  // agreeing with the pull means lookX and dyaw have opposite signs; the same sign
+  // is a deliberate turn away and the assist must not answer it.
+  if (Input.lookX * dyaw > 0 && Math.abs(Input.lookX) > Input.padLook * 0.1) return;
+  const flick = Math.min(1, Math.hypot(Input.lookX, Input.lookY) / Input.padLook);
+  const k = Math.min(1, (e.ads ? 1.7 : 0.9) * near * (1 - flick) * dt);
+  e.yaw += dyaw * k;
+  e.pitch = clamp(e.pitch + (wantPitch - e.pitch) * k, -1.5, 1.5);
+}
+
+// Mouse aim assist. A mouse needs no slowdown, but aiming in nudges the
+// crosshair the rest of the way onto whoever is already near it: a small snap on
+// the frame ADS starts, then a light magnetism while it is held. It's deliberately
+// weaker than the pad version and lets go whenever the mouse is pulling away.
+function mouseAssist(e, dt) {
+  const ads = !!Input.mouse[2] && !e.buildMode;
+  const started = ads && !e.adsWas;
+  e.adsWas = ads;
+  if (!ads || !G.aimAssist || G.state !== 'play') return;
+  const tgt = assistTarget(e);
+  if (!tgt) return;
+  const ex = e.pos[0], ey = entEye(e), ez = e.pos[2];
+  const o = tgt.ent;
+  const flat = Math.sqrt(dist2(ex, ez, o.pos[0], o.pos[2]));
+  const wantYaw = Math.atan2(-(o.pos[0] - ex), -(o.pos[2] - ez));
+  const wantPitch = Math.atan2(entEye(o) - ey, flat);
+  const dyaw = angleDelta(e.yaw, wantYaw), dpitch = wantPitch - e.pitch;
+  // e.yaw -= dx, so a mouse moving with the pull has dx and dyaw of opposite sign;
+  // the same sign is a deliberate turn away. Same for pitch.
+  if (Input.dx * dyaw > 0 && Math.abs(Input.dx) > 0.0015) return;
+  if (Input.dy * dpitch > 0 && Math.abs(Input.dy) > 0.0015) return;
+  const near = tgt.aim;                                  // 0 = cone edge, 1 = centred
+  const k = started ? 0.3 + 0.3 * near : Math.min(1, 1.2 * near * dt);
+  e.yaw = wrapAngle(e.yaw + dyaw * k);
+  e.pitch = clamp(e.pitch + dpitch * k, -1.5, 1.5);
+}
+
+const ASSIST_CONE = 0.975;        // ~12.8 degrees — outside this there is no assist at all
+const ASSIST_FULL = 0.9955;       // ~5.4 degrees — full strength
+
+// Nearest enemy under the crosshair, with how centred they are. Measured from the
+// eye so it agrees with the magnetism in padLook.
+function assistTarget(e) {
+  const ex = e.pos[0], ey = entEye(e), ez = e.pos[2];
+  const d = dirFrom(e.yaw, e.pitch, _av);
+  let best = null, bestDot = ASSIST_CONE;
+  for (const o of G.ents) {
+    if (o === e || !o.alive) continue;
+    const dx = o.pos[0] - ex, dy = entEye(o) - ey, dz = o.pos[2] - ez;
+    const l = len3(dx, dy, dz);
+    if (l > 95 || l < 1) continue;
+    const dot = (dx * d[0] + dy * d[1] + dz * d[2]) / l;
+    if (dot <= bestDot) continue;
+    if (!losClear(ex, ey, ez, o.pos[0], entEye(o), o.pos[2])) continue;
+    bestDot = dot; best = o;
+  }
+  if (!best) return null;
+  const n = clamp((bestDot - ASSIST_CONE) / (ASSIST_FULL - ASSIST_CONE), 0, 1);
+  return { ent: best, aim: n * n * (3 - 2 * n) };      // smoothstep, so it fades in
+}
+
+function updateSkydive(e, dt, wishX, wishZ, isPlayer) {
+  const ground = terrainHeight(e.pos[0], e.pos[2]);
+  const glide = e.pos[1] - ground < 45;
+  e.glide = glide;
+  const fall = glide ? 13 : 42;
+  const drive = glide ? 16 : 26;
+  e.vel[1] = -fall;
+  const dive = isPlayer ? (Input.down('KeyW') || Input.moveZ > 0.45 ? 1 : 0) : 1;
+  e.vel[0] = lerp(e.vel[0], wishX * drive * (dive ? 1 : 0.6), Math.min(1, 2.4 * dt));
+  e.vel[2] = lerp(e.vel[2], wishZ * drive * (dive ? 1 : 0.6), Math.min(1, 2.4 * dt));
+  e.pos[0] = clamp(e.pos[0] + e.vel[0] * dt, -HALF + 2, HALF - 2);
+  e.pos[2] = clamp(e.pos[2] + e.vel[2] * dt, -HALF + 2, HALF - 2);
+  const prevY = e.pos[1];
+  e.pos[1] += e.vel[1] * dt;
+  // land on whatever is under you — a roof or a floor as readily as the ground
+  const land = surfaceUnder(e.pos[0], e.pos[1], e.pos[2], prevY);
+  if (e.pos[1] <= land + 0.05) {
+    e.pos[1] = land; e.vel[0] = e.vel[1] = e.vel[2] = 0; e.glide = false; e.grounded = true;
+    spawnParticles(e.pos[0], e.pos[1] + 0.1, e.pos[2], 8, [0.6, 0.55, 0.45], 2.5, 0.12, 0.45, 8);
+    if (isPlayer) { G.state = 'play'; say('LOOT UP'); }
+    else e.landed = true;
+  }
+}
+
+function nearChest(e) {
+  for (const ch of World.chests) {
+    if (ch.opened) continue;
+    if (dist2(e.pos[0], e.pos[2], ch.x, ch.z) < 9 && Math.abs(e.pos[1] - ch.y) < 3) return ch;
+  }
+  return null;
+}
+
+function interact(e) {
+  // chests first
+  const ch = nearChest(e);
+  if (ch) {
+    ch.opened = true; ch.openT = 0;
+    const n = 3 + ((Math.random() * 2) | 0);
+    const before = World.loot.length;
+    for (let i = 0; i < n; i++) randomLootAt(ch.x, ch.y + 0.9, ch.z, 1);
+    // fling the contents out of the lid so they visibly come from the chest
+    for (let i = before; i < World.loot.length; i++) {
+      const a = ((i - before) / n) * Math.PI * 2 + rnd(-0.4, 0.4);
+      tossLoot(World.loot[i], Math.cos(a) * rnd(3.5, 6), rnd(6, 8.5), Math.sin(a) * rnd(3.5, 6), 0.5);
+    }
+    spawnParticles(ch.x, ch.y + 0.8, ch.z, 14, [1.0, 0.85, 0.35], 3.5, 0.1, 0.8, 6);
+    playUpper(e, 'Interact', 0.6);
+    sfxNear(e, Sfx.pickup.bind(Sfx)); if (e === G.player) say('CHEST OPENED');
+    return;
+  }
+  // then whatever you are pointing at. Bots have no crosshair, so they still grab
+  // the nearest thing instead.
+  const l = e === G.player ? lookedAtLoot(e, PICKUP_RANGE) : nearestLoot(e, 2.4);
+  if (l && takeLoot(e, l, e === G.player)) playUpper(e, 'PickUp', 0.5);
+}
+function firstEmptyOr(e) { for (let i = 1; i < 5; i++) if (!e.inv[i]) return i; return 1; }
+
+const PICKUP_RANGE = 4.5;
+
+// The item you are pointing at: the one closest to the *centre of view*, scored by
+// angle rather than distance, so aiming picks a specific gun out of a pile.
+// The ray starts at the player's eye, not the camera — at pickup range the camera's
+// shoulder offset is bigger than the gap between two items on the ground, so a
+// camera ray reliably chooses the wrong one. If nothing is in view, whatever you are
+// standing on counts; a press is still a press.
+function lookedAtLoot(e, range) {
+  const d = dirFrom(e.yaw, e.pitch, _lookv);
+  const ox = e.pos[0], oy = entEye(e), oz = e.pos[2];
+  let best = null, bestAng = 0.42;                 // ~24 degrees off centre, stick-friendly
+  for (const l of World.loot) {
+    if (l.cool > 0) continue;
+    if (dist2(ox, oz, l.x, l.z) > range * range) continue;
+    if (Math.abs(l.y - e.pos[1]) > 4) continue;
+    const vx = l.x - ox, vy = (l.y + 0.35) - oy, vz = l.z - oz;
+    const t = vx * d[0] + vy * d[1] + vz * d[2];
+    if (t <= 0) continue;                                        // behind you
+    const ang = len3(vx - d[0] * t, vy - d[1] * t, vz - d[2] * t) / t;
+    if (ang < bestAng) { bestAng = ang; best = l; }
+  }
+  return best || nearestLoot(e, 2.2);
+}
+
+// Move one ground item into an entity. `swap` lets a manual pickup replace the held
+// slot when the inventory is full — that's how you trade one gun for another.
+// Returns false if there was no room for it.
+function takeLoot(e, l, swap) {
+  if (l.cool > 0) return false;
+  if (l.kind === 'ammo') {
+    e.ammo[l.data.type] += l.data.n; removeLoot(l); sfxNear(e, Sfx.pickup.bind(Sfx));
+    if (e === G.player) say('PICKED UP ' + l.data.n + ' ' + l.data.type.toUpperCase() + ' AMMO');
+    return true;
+  }
+  if (l.kind === 'mats') {
+    e.mats[l.data.mat] = Math.min(999, e.mats[l.data.mat] + l.data.n);
+    removeLoot(l); sfxNear(e, Sfx.pickup.bind(Sfx));
+    return true;
+  }
+  // weapons, shields and medkits all want an inventory slot
+  let slot = e.inv.findIndex((x, i) => i > 0 && !x);
+  if (slot < 1 && swap) slot = e.slot === 0 ? firstEmptyOr(e) : e.slot;
+  if (slot < 1) { if (e === G.player) say('INVENTORY FULL'); return false; }
+  const old = e.inv[slot];
+  e.inv[slot] = l.kind === 'weapon' ? l.data.item
+    : { id: l.kind, rar: l.kind === 'shield' ? 2 : 3, mag: 0 };
+  removeLoot(l);
+  if (old) {   // whatever was in that slot goes back on the ground
+    const fx = -Math.sin(e.yaw), fz = -Math.cos(e.yaw);
+    tossLoot(spawnLoot(old.id === 'shield' || old.id === 'medkit' ? old.id : 'weapon',
+      e.pos[0] + fx * 0.5, e.pos[1] + 1.2, e.pos[2] + fz * 0.5, { item: old }),
+      fx * 4.5, 3.2, fz * 4.5, 1.1);
+  }
+  sfxNear(e, Sfx.pickup.bind(Sfx));
+  if (e === G.player) {
+    e.slot = slot;
+    const it = e.inv[slot];
+    say('PICKED UP ' + (it.id === 'shield' ? 'SHIELD POTION' : it.id === 'medkit' ? 'MEDKIT'
+      : weaponLabel(it)).toUpperCase());
+  }
+  return true;
+}
+
+// Only play an actor's sound if it's the player or close enough to hear.
+function sfxNear(e, fn) {
+  if (e === G.player || dist2(e.pos[0], e.pos[2], G.player.pos[0], G.player.pos[2]) < 45 * 45) fn();
+}
+
+// Throw whatever is in the held slot out in front of the player. The pickaxe
+// can't be dropped (it is what you fall back on with an empty inventory).
+function dropHeld(e) {
+  if (e.slot === 0) { if (e === G.player) say("CAN'T DROP THE PICKAXE"); return false; }
+  const it = e.inv[e.slot];
+  if (!it) return false;
+  const fx = -Math.sin(e.yaw), fz = -Math.cos(e.yaw);
+  const l = spawnLoot(it.id === 'shield' || it.id === 'medkit' ? it.id : 'weapon',
+    e.pos[0] + fx * 0.6, e.pos[1] + 1.25, e.pos[2] + fz * 0.6, { item: it });
+  tossLoot(l, fx * 6.5, 3.4, fz * 6.5, 1.1);
+  e.inv[e.slot] = null;
+  if (e.reloadT > 0) e.reloadT = 0;
+  if (e.useT > 0) { e.useT = 0; e.useKind = null; }
+  playUpper(e, 'Throw', 0.5);
+  Sfx.swing();
+  if (e === G.player) {
+    say('DROPPED ' + (it.id === 'shield' ? 'SHIELD POTION' : it.id === 'medkit' ? 'MEDKIT' : weaponLabel(it)).toUpperCase());
+  }
+  return true;
+}
+
+// Throw a stack of the held weapon's ammo (shift+G) — handy for a teammate or
+// just clearing space you don't need.
+function dropAmmo(e) {
+  const it = curItem(e);
+  const type = it && WEAPONS[it.id] ? WEAPONS[it.id].ammo : null;
+  if (!type || e.ammo[type] <= 0) { if (e === G.player) say('NO AMMO TO DROP'); return false; }
+  const n = Math.min(e.ammo[type], 30);
+  e.ammo[type] -= n;
+  const fx = -Math.sin(e.yaw), fz = -Math.cos(e.yaw);
+  const l = spawnAmmoLoot(e.pos[0] + fx * 0.6, e.pos[1] + 1.25, e.pos[2] + fz * 0.6, type, n);
+  tossLoot(l, fx * 5.5, 3.2, fz * 5.5, 1.1);
+  playUpper(e, 'Throw', 0.5);
+  Sfx.swing();
+  if (e === G.player) say('DROPPED ' + n + ' ' + type.toUpperCase());
+  return true;
+}
+
+function nearestLoot(e, rad) {
+  let best = null, bd = rad * rad;
+  for (const l of World.loot) {
+    if (l.cool > 0) continue;
+    const d = dist2(e.pos[0], e.pos[2], l.x, l.z);
+    if (d < bd && Math.abs(l.y - e.pos[1]) < 3) { bd = d; best = l; }
+  }
+  return best;
+}
+function removeLoot(l) { const i = World.loot.indexOf(l); if (i >= 0) World.loot.splice(i, 1); }
+
+// Walking over something only collects materials and ammo. Guns and heals have to
+// be picked up deliberately with E / X so you never swallow a worse weapon by
+// accident. Bots have no crosshair to point, so they keep hoovering everything up.
+const AUTO_KINDS = { mats: 1, ammo: 1 };
+function autoPickup(e) {
+  const restricted = e === G.player;
+  for (let i = World.loot.length - 1; i >= 0; i--) {
+    const l = World.loot[i];
+    if (restricted && !AUTO_KINDS[l.kind]) continue;
+    if (l.cool > 0) continue;
+    if (dist2(e.pos[0], e.pos[2], l.x, l.z) > 2.6 || Math.abs(l.y - e.pos[1]) > 3) continue;
+    takeLoot(e, l, false);
+  }
+}
+
+/* ---------------------------------- bots ----------------------------------- */
+
+function updateBot(b, dt) {
+  if (!b.alive) return;
+  if (!b.landed && G.state === 'drop' && b.pos[1] > terrainHeight(b.pos[0], b.pos[2]) + 0.1) {
+    const dx = b.landing.x - b.pos[0], dz = b.landing.z - b.pos[2];
+    const l = len2(dx, dz) || 1;
+    b.yaw = Math.atan2(-dx, -dz);
+    updateSkydive(b, dt, dx / l, dz / l, false);
+    return;
+  }
+
+  b.think -= dt;
+  if (b.think <= 0) { b.think = 0.18 + Math.random() * 0.14; botThink(b); }
+
+  const s = G.storm;
+  let goX = null, goZ = null, sprint = false;
+  const dc = Math.sqrt(dist2(b.pos[0], b.pos[2], s.cx, s.cz));
+
+  // grabbing a weapon 20m away beats sprinting to the circle empty-handed
+  const grabFirst = b.lootTarget && dist2(b.pos[0], b.pos[2], b.lootTarget[0], b.lootTarget[1]) < 25 * 25;
+  if (dc > s.r * 0.78 && !grabFirst) { goX = s.cx; goZ = s.cz; sprint = true; }   // rotate to safety
+  else if (b.target) {                                                   // fight
+    if (b.useT > 0) { b.useT = 0; b.useKind = null; }   // getting shot at interrupts a heal
+    const t = b.target;
+    const d = Math.sqrt(dist2(b.pos[0], b.pos[2], t.pos[0], t.pos[2]));
+    const dx = t.pos[0] - b.pos[0], dz = t.pos[2] - b.pos[2];
+    b.yaw = Math.atan2(-dx, -dz);
+    b.pitch = clamp(Math.atan2(entEye(t) - entEye(b), d), -1, 1);
+    const want = curItem(b) && curItem(b).id === 'shotgun' ? 8 : 18;
+    b.strafeT -= dt;
+    if (b.strafeT <= 0) { b.strafeT = rnd(0.6, 1.6); b.strafe = Math.random() < 0.5 ? -1 : 1; }
+    const rx = Math.cos(b.yaw), rz = -Math.sin(b.yaw);
+    const fx = -Math.sin(b.yaw), fz = -Math.cos(b.yaw);
+    const push = clamp((d - want) / 10, -1, 1);
+    goX = b.pos[0] + fx * push * 6 + rx * b.strafe * 5;
+    goZ = b.pos[2] + fz * push * 6 + rz * b.strafe * 5;
+    // shoot
+    const it = curItem(b);
+    b.aimT -= dt;
+    if (it && !it.melee && WEAPONS[it.id].ammo && d < WEAPONS[it.id].range * 0.7) {
+      if (b.burst > 0 && b.fireT <= 0 && b.reloadT <= 0 && b.aimT <= 0) {
+        const gp = gunPoint(b);
+        const ax = t.pos[0] - gp[0], ay = entEye(t) + rnd(-0.3, 0.3) - gp[1], az = t.pos[2] - gp[2];
+        const l = len3(ax, ay, az) || 1;
+        tryFire(b, ax / l, ay / l, az / l);
+        b.burst--;
+        if (b.burst <= 0) b.aimT = rnd(1.1, 2.5);   // breathe between bursts
+      }
+    }
+    // panic wall
+    if (b.hp + b.shield < 70 && b.wallT <= 0 && b.mats[b.buildMat] >= BUILD_COST && b.grounded) {
+      b.buildType = Math.random() < 0.75 ? 0 : 2;
+      if (tryBuild(b)) b.wallT = rnd(2.5, 5);
+    }
+  } else {                                                               // loot / wander
+    goX = b.wander[0]; goZ = b.wander[1];
+    if (dist2(b.pos[0], b.pos[2], goX, goZ) < 9) { interact(b); botPickWander(b); }
+    autoPickup(b);
+    // heal and shield up out of combat, from items they actually carry
+    if (b.useT <= 0) {
+      const want = b.hp < 60 ? 'medkit' : b.shield < 75 ? 'shield' : null;
+      const i = want ? b.inv.findIndex((x, ix) => ix > 0 && x && x.id === want) : -1;
+      if (i > 0) { b.useT = want === 'shield' ? 2.2 : 3.6; b.useKind = want; b.useSlot = i; playUpper(b, 'Use_Item', b.useT); }
+    }
+    // harvest for real: only gain mats from a prop actually within reach
+    b.harvestT = (b.harvestT || 0) - dt;
+    if (b.harvestT <= 0) {
+      b.harvestT = 1.2;
+      const near = queryBoxes(b.pos[0] - 3, 0, b.pos[2] - 3, b.pos[0] + 3, 6, b.pos[2] + 3, []);
+      const hit = near.find(c => c.kind === 'prop');
+      if (hit) {
+        const got = damageProp(hit.ref, WEAPONS.pickaxe.harvest);
+        b.mats[hit.ref.mat] = Math.min(500, b.mats[hit.ref.mat] + got);
+        if (b.slot === 0) playUpper(b, '1H_Melee_Attack_Chop', 0.5);
+        materialChips(MAT_COLOR[hit.ref.mat], hit.ref.x, hit.ref.y + 1, hit.ref.z, 4);
+      }
+    }
+  }
+  b.wallT -= dt;
+
+  // move
+  let mvx = 0, mvz = 0;
+  if (goX !== null) {
+    const dx = goX - b.pos[0], dz = goZ - b.pos[2];
+    const l = len2(dx, dz);
+    if (l > 0.6) { mvx = dx / l; mvz = dz / l; if (!b.target) b.yaw = Math.atan2(-mvx, -mvz); }
+  }
+  const spd = sprint ? 10.2 : 7.4;
+  b.vel[0] += (mvx * spd - b.vel[0]) * Math.min(1, 50 * dt);
+  b.vel[2] += (mvz * spd - b.vel[2]) * Math.min(1, 50 * dt);
+  b.vel[1] -= 30 * dt;
+
+  const beforeX = b.pos[0], beforeZ = b.pos[2];
+  moveEntity(b, dt);
+  const moved = dist2(beforeX, beforeZ, b.pos[0], b.pos[2]);
+  if ((mvx || mvz) && moved < 0.0004) {
+    b.stuckT += dt;
+    if (b.stuckT > 0.35) {
+      if (b.grounded) b.vel[1] = 9.4;                                    // hop over it
+      if (b.stuckT > 1.1) { botPickWander(b); b.stuckT = 0; }
+      // build a ramp out of trouble
+      if (b.grounded && b.mats[b.buildMat] >= BUILD_COST && Math.random() < 0.35) {
+        b.buildType = 2; tryBuild(b);
+      }
+    }
+  } else b.stuckT = 0;
+
+  if (b.fireT > 0) b.fireT -= dt;
+  if (b.reloadT > 0) { b.reloadT -= dt; if (b.reloadT <= 0) finishReload(b); }
+  if (b.useT > 0) { b.useT -= dt; if (b.useT <= 0) botFinishConsume(b); }
+}
+
+function botThink(b) {
+  let best = null, bd = 65 * 65;
+  for (const e of G.ents) {
+    if (e === b || !e.alive || e.pos[1] > TERRAIN_MAX + 40) continue;   // still in the air
+    const d = dist2(b.pos[0], b.pos[2], e.pos[0], e.pos[2]);
+    if (d < bd && losClear(b.pos[0], entEye(b), b.pos[2], e.pos[0], entEye(e), e.pos[2])) { bd = d; best = e; }
+  }
+  // An unarmed bot ignores anyone who isn't already on top of it — getting a gun
+  // beats swinging a pickaxe at someone 40m away.
+  b.target = (best && (botHasGun(b) || bd < 12 * 12)) ? best : null;
+  best = b.target;
+  if (best && b.burst <= 0 && Math.random() < 0.55 + b.skill * 0.4) b.burst = 2 + ((Math.random() * 5) | 0);
+  if (!best) b.burst = 0;
+  // hold the best thing they actually own (no conjuring — they have to loot)
+  if (!curItem(b) || curItem(b).id === 'pickaxe' || curItem(b).id === 'shield' || curItem(b).id === 'medkit') {
+    const gun = b.inv.findIndex((x, i) => i > 0 && x && WEAPONS[x.id] && WEAPONS[x.id].ammo);
+    if (gun > 0) b.slot = gun;
+  }
+  b.lootTarget = botHasGun(b) ? null : findLootTarget(b, 80);
+  if (!b.wander[0] && !b.wander[1]) botPickWander(b);
+}
+
+function botFinishConsume(b) {
+  if (b.inv[b.useSlot] && b.inv[b.useSlot].id === b.useKind) {
+    if (b.useKind === 'shield') b.shield = Math.min(100, b.shield + 50);
+    else b.hp = Math.min(100, b.hp + 100);
+    b.inv[b.useSlot] = null;
+  }
+  b.useKind = null;
+}
+
+function botHasGun(b) {
+  return b.inv.some((x, i) => i > 0 && x && WEAPONS[x.id] && WEAPONS[x.id].ammo);
+}
+
+// Nearest thing worth walking to when you have no gun: dropped weapon or chest.
+function findLootTarget(b, range) {
+  let bx = null, bz = null, bd = range * range;
+  for (const l of World.loot) {
+    if (l.kind !== 'weapon' || l.cool > 0) continue;
+    const d = dist2(b.pos[0], b.pos[2], l.x, l.z);
+    if (d < bd) { bd = d; bx = l.x; bz = l.z; }
+  }
+  for (const ch of World.chests) {
+    if (ch.opened) continue;
+    const d = dist2(b.pos[0], b.pos[2], ch.x, ch.z);
+    if (d < bd) { bd = d; bx = ch.x; bz = ch.z; }
+  }
+  return bx === null ? null : [bx, bz];
+}
+
+function botPickWander(b) {
+  if (b.lootTarget) { b.wander[0] = b.lootTarget[0]; b.wander[1] = b.lootTarget[1]; return; }
+  const s = G.storm;
+  const a = rnd(0, Math.PI * 2), r = rnd(0, s.r * 0.7);
+  b.wander[0] = clamp(s.cx + Math.cos(a) * r, -HALF + 5, HALF - 5);
+  b.wander[1] = clamp(s.cz + Math.sin(a) * r, -HALF + 5, HALF - 5);
+}
+
+/* --------------------------------- camera ---------------------------------- */
+
+// Camera smoothing, advanced once a frame. cameraState() itself has to be pure —
+// it is called several times a frame (aim, build ghost, render) and every caller
+// must see the same camera.
+function updateCamera(e, dt) {
+  const ey = entEye(e);
+  // Stairs, ramps and rolling terrain move the eye in hard steps; lagging it
+  // slightly is the difference between climbing a ramp and strobing up it.
+  if (e.camY === undefined || Math.abs(e.camY - ey) > 3) e.camY = ey;
+  else e.camY += (ey - e.camY) * Math.min(1, 16 * dt);
+
+  const want = e.ads ? CAM_ADS : CAM_BOOM;
+  const d = dirFrom(e.yaw, e.pitch, _camv);
+  const rx = Math.cos(e.yaw), rz = -Math.sin(e.yaw);
+  const off = e.ads ? 0.55 : 0.95;
+  const bx = e.pos[0] + rx * off, by = e.camY + 0.5, bz = e.pos[2] + rz * off;
+  const hit = rayWorld(bx, by, bz, -d[0], -d[1], -d[2], want);
+  const target = hit ? Math.max(0.6, hit.t - 0.25) : want;
+  if (e.camDist === undefined) e.camDist = target;
+  // pull in instantly so the camera never clips through a wall, ease back out
+  e.camDist = target < e.camDist ? target : e.camDist + (target - e.camDist) * Math.min(1, 7 * dt);
+
+  // FOV eases into the aim rather than snapping — a hard cut every time you touch
+  // the trigger is most of what "not smooth" feels like
+  const it = curItem(e);
+  const wantFov = (e.ads && it && WEAPONS[it.id]) ? (WEAPONS[it.id].scope ? FOV.scope : FOV.ads) : FOV.base;
+  if (e.fov === undefined) e.fov = wantFov;
+  else e.fov += (wantFov - e.fov) * Math.min(1, 15 * dt);
+}
+
+const CAM_BOOM = 4.6, CAM_ADS = 2.4;
+
+function cameraState(e) {
+  const d = dirFrom(e.yaw, e.pitch, _camv);
+  const ex = e.pos[0], ez = e.pos[2];
+  const ey = e.camY === undefined ? entEye(e) : e.camY;
+  if (G.firstPerson) return { x: ex, y: ey, z: ez };
+  const rx = Math.cos(e.yaw), rz = -Math.sin(e.yaw);
+  const off = e.ads ? 0.55 : 0.95;
+  const want = e.camDist === undefined ? (e.ads ? CAM_ADS : CAM_BOOM) : e.camDist;
+  const bx = ex + rx * off, by = ey + 0.5, bz = ez + rz * off;
+  return { x: bx - d[0] * want, y: by - d[1] * want, z: bz - d[2] * want };
+}
+
+/* --------------------------------- render ---------------------------------- */
+
+// Fixed colours the scene loops used to build as fresh array literals on every
+// object, every frame. Hoisted, they are read-only lookups instead of a few
+// hundred short-lived allocations a frame.
+const COL_FLASH = [1, 0.9, 0.6];
+const COL_TRUNK = [0.36, 0.25, 0.15], COL_LEAF = [0.20, 0.45, 0.20];
+const COL_ROCK = [0.48, 0.46, 0.44];
+const COL_CHEST = [0.85, 0.68, 0.20], COL_CHEST_OPEN = [0.55, 0.44, 0.14];
+const COL_GHOST_OK = [0.45, 0.85, 1.0], COL_GHOST_NO = [1.0, 0.25, 0.25];
+const COL_SKIN = [0.90, 0.75, 0.62];
+const COL_GLIDER = [0.92, 0.92, 0.97], COL_GLIDER_POLE = [0.35, 0.35, 0.38];
+const COL_HURT = [1, 0.5, 0.5], COL_MUZZLE = [1, 0.85, 0.4];
+// Tints for loaded models. These multiply the texture rather than replacing a
+// flat colour, so "no tint" is white and the hit flash has to go above 1 to read
+// as a flash at all.
+const COL_WHITE = [1, 1, 1];
+const COL_FLASH_TEX = [2.2, 1.9, 1.2];
+const COL_HURT_TEX = [2.0, 1.1, 1.1];
+const COL_SHIELD = [0.30, 0.55, 1.0], COL_MEDKIT = [0.95, 0.35, 0.35];
+const COL_GUN_DARK = [0.20, 0.21, 0.24], COL_GUN_METAL = [0.55, 0.57, 0.62], COL_WOOD_DARK = [0.42, 0.28, 0.16];
+const COL_BUS = [0.22, 0.48, 0.88], COL_BALLOON = [0.35, 0.62, 0.95];
+const _aimv = [0, 0, 0], _lookv = [0, 0, 0];   // per-call-site, never shared
+const _dark = [0, 0, 0], _tint = [1, 1, 1];
+const _gm = new Float32Array(16), _gm2 = new Float32Array(16), _gm3 = new Float32Array(16), _gfix = new Float32Array(16);
+const FOV = { base: 1.58, ads: 1.20, scope: 0.46 };   // vertical, radians (~90° V / ~123° H at 16:9)
+
+// Model-space yaw of the KayKit characters: they face +Z, the game faces -Z.
+const CHAR_YAW = Math.PI;
+const CHAR_HEIGHT = 2.05;   // drawn height in metres (the collider stays ENT_H)
+// The held weapon is anchored at the right hand slot but *oriented by the aim*
+// (yaw + pitch), not by the hand bone — KayKit's aiming poses hold weapons
+// angled across the body, and a gun that points where the character looks is
+// what reads correctly. GRIP is where the hand sits in gun space.
+const GUN_SCALE = 0.9;
+const GUN_GRIP = { pickaxe: [0, -0.35, 0], pistol: [0, -0.14, 0.12], default: [0, -0.12, 0.16] };
+const PITCH_K = -0.62;   // chest bend per radian of aim pitch (sign: model faces +Z)
+
+function renderScene() {
+  const p = G.player;
+  let cam, yaw, pitch, fov;
+  if (G.state === 'menu') {
+    // slow orbit around the central POI behind the menu
+    const poi = World.pois[0] || { x: 0, z: 0, y: 0 };
+    const a = G.menuT * 0.08;
+    const cx = poi.x + Math.cos(a) * 58, cz = poi.z + Math.sin(a) * 58, cy = poi.y + 24;
+    yaw = Math.atan2(-(poi.x - cx), -(poi.z - cz));
+    pitch = Math.atan2(poi.y + 4 - cy, 58);
+    cam = { x: cx, y: cy, z: cz }; fov = 1.25;
+  } else if (G.debugCam) {
+    cam = G.debugCam; yaw = cam.yaw; pitch = cam.pitch; fov = 1.1;
+  } else {
+    cam = cameraState(p);
+    yaw = p.yaw; pitch = p.pitch;
+    fov = p.fov === undefined ? FOV.base : p.fov;   // eased in updateCamera
+  }
+  R.time = G.t + G.menuT;
+  R.begin(cam.x, cam.y, cam.z, yaw, pitch, fov);
+
+  R.drawTerrain();
+
+  const VIEW = 260;
+
+  // build pieces
+  for (const piece of World.pieces.values()) {
+    const px = piece.gx * GRID + GRID / 2, pz = piece.gz * GRID + GRID / 2;
+    if (!R.inView(px, pz, GRID, VIEW)) continue;
+    const y0 = pieceY(piece);
+    let cr, cg, cb;
+    if (piece.hitT > 0) { cr = 1.8; cg = 1.6; cb = 1.1; }
+    else {
+      const k = 0.55 + 0.45 * (piece.hp / piece.maxHp);
+      cr = k; cg = k; cb = k;
+    }
+    // pieces grow into place over a quarter second
+    let s = 1;
+    if (piece.born !== undefined && piece.born >= 0) {
+      const age = G.t - piece.born;
+      if (age < 0.26) { const t = age / 0.26; s = 0.12 + 0.88 * (1 + 1.5 * Math.pow(t - 1, 3) + 1.5 * Math.pow(t - 1, 2) * (t - 1) + 1) * 0.5; s = clamp(0.12 + 0.88 * (1 - Math.pow(1 - t, 3)), 0.12, 1.06); }
+    }
+    drawPiece(piece.type, piece.mat, piece.rot, px, y0, pz, s, cr, cg, cb, 0, 0);
+  }
+  for (const c of World.collapsing) {
+    const [px, pz] = tileCenter(c.gx, c.gz);
+    if (!R.inView(px, pz, GRID, VIEW)) continue;
+    const k = 0.7 - c.t * 0.3;
+    drawPiece(c.type, c.mat, c.rot, px, c.y, pz, Math.max(0.05, 1 - c.t * 0.6), k, k, k, c.spin * c.t, c.t * 0.6);
+  }
+
+  // props — a loaded .glb takes over when one is present, otherwise a plain box
+  // of the same footprint. Colliders never look at the model, so sight lines and
+  // cover read the same either way.
+  for (const pr of World.props) {
+    if (!R.inView(pr.x, pr.z, pr.cull, pr.kind === 'bush' || pr.kind === 'rug' ? 150 : VIEW)) continue;
+    const flash = pr.hitT > 0;
+    const mdl = Assets.get(pr.model);
+    if (mdl) {
+      const t = flash ? COL_FLASH_TEX : COL_WHITE;
+      R.pushModel(mdl, pr.x, pr.y, pr.z, pr.rot, pr.h, t[0], t[1], t[2], 1);
+      continue;
+    }
+    if (pr.kind === 'tree' || pr.kind === 'tree_dead') {
+      R.box(pr.x, pr.y + pr.h * 0.27, pr.z, 0.7, pr.h * 0.54, 0.7, flash ? COL_FLASH : COL_TRUNK);
+      const cn = flash ? COL_FLASH : COL_LEAF;
+      R.push(MESH_CONE, pr.x, pr.y + pr.h * 0.68, pr.z, 0, 0, 4.4, pr.h * 0.64, 4.4, cn[0], cn[1], cn[2], 1);
+    } else {
+      const c = pr.col;
+      const w = c ? c.maxx - c.minx : 1, d = c ? c.maxz - c.minz : 1;
+      R.box(pr.x, pr.y + pr.h / 2, pr.z, w, pr.h, d, flash ? COL_FLASH : (pr.kind === 'rock' ? COL_ROCK : MAT_COLOR[pr.mat]), 0);
+    }
+  }
+
+  // chests
+  const chestMdl = Assets.get('chest');
+  for (const ch of World.chests) {
+    if (!R.inView(ch.x, ch.z, 1.2, VIEW)) continue;
+    const bob = ch.opened ? 0 : Math.sin(G.t * 2 + ch.t) * 0.05;
+    if (chestMdl) {
+      const t = ch.opened ? COL_CHEST_OPEN : COL_WHITE;
+      R.pushModel(chestMdl, ch.x, ch.y + bob, ch.z, ch.rot || 0, 1.1, t[0], t[1], t[2], 1);
+    } else {
+      R.box(ch.x, ch.y + 0.45 + bob, ch.z, 1.4, 0.9, 1.0, ch.opened ? COL_CHEST_OPEN : COL_CHEST, ch.rot || 0);
+    }
+    if (!ch.opened) {   // a soft golden glow so unopened chests read from across a room
+      R.push(MESH_SPHERE, ch.x, ch.y + 0.6 + bob, ch.z, 0, 0, 2.6, 1.6, 2.4, 1.0, 0.85, 0.35, 0.10);
+    }
+  }
+
+  // loot — each kind gets its own silhouette so you can read it at a distance,
+  // and a name tag on top of that once you are close (see drawLootLabels)
+  for (const l of World.loot) {
+    if (!R.inView(l.x, l.z, 2, 170)) continue;
+    drawLoot(l);
+  }
+
+  // characters (dead ones linger for a few seconds, playing their fall)
+  for (const e of G.ents) {
+    if (!e.alive && e.deadT > 5) continue;
+    if (e === G.player && G.firstPerson && G.state !== 'menu') continue;
+    // the player's own body sits right where the boom camera pivots, so never
+    // cull it on the wedge — only on distance, which it always passes
+    if (e !== G.player && !R.inView(e.pos[0], e.pos[2], 2.2, VIEW)) continue;   // glider is 3.4 across
+    drawChar(e);
+  }
+  if (G.firstPerson && p.alive && G.state !== 'menu') drawFirstPersonGun(p, cam);
+
+  // battle bus
+  if (G.bus && G.bus.t < 40) drawBus(G.bus);
+
+  // tracers + particles
+  for (const t of G.tracers) R.line(t.ax, t.ay, t.az, t.bx, t.by, t.bz, 0.07, t.col, 0.9);
+  for (const q of G.parts) {
+    const k = 1 - q.t / q.life;
+    R.push(MESH_CUBE, q.x, q.y, q.z, q.yaw, q.spin, q.size * k, q.size * k, q.size * k, q.col[0], q.col[1], q.col[2], 1);
+  }
+
+  // build ghost
+  if (p.alive && p.buildMode && G.state === 'play') {
+    const plan = buildPlan(p);
+    const ok = canPlace(plan.type, plan.gx, plan.gy, plan.gz, plan.rot) && p.mats[p.buildMat] >= BUILD_COST;
+    const c = ok ? COL_GHOST_OK : COL_GHOST_NO;
+    const [gx, gz] = tileCenter(plan.gx, plan.gz);
+    const y0 = plan.gy * LEV;
+    if (plan.type === 'wall') {
+      if (plan.rot === 0) R.box(gx, y0 + LEV / 2, plan.gz * GRID, GRID, LEV, 0.34, c, 0, 0.4);
+      else R.box(plan.gx * GRID, y0 + LEV / 2, gz, 0.34, LEV, GRID, c, 0, 0.4);
+    } else if (plan.type === 'floor') R.box(gx, y0 - 0.15, gz, GRID, 0.32, GRID, c, 0, 0.4);
+    else if (plan.type === 'ramp') R.push(MESH_RAMP, gx, y0 + LEV / 2, gz, plan.rot * Math.PI / 2, 0, GRID, LEV, GRID, c[0], c[1], c[2], 0.4);
+    else R.push(MESH_CONE, gx, y0 + CONE_H / 2, gz, 0, 0, GRID, CONE_H, GRID, c[0], c[1], c[2], 0.4);
+  }
+
+  // storm wall
+  if (G.storm) {
+    const s = G.storm;
+    const sy = TERRAIN_MIN - 10, sh = 150;   // tall enough to wall off the highest ridge
+    R.push(MESH_CYL, s.cx, sy, s.cz, 0, 0, s.r, sh, s.r, 0.55, 0.30, 0.92, 0.32);
+    R.push(MESH_CYL, s.cx, sy, s.cz, 0, 0, s.r + 1.5, sh, s.r + 1.5, 0.35, 0.16, 0.75, 0.24);
+  }
+
+  R.end();
+}
+
+// One build piece with its material texture. `s` is the build-up scale (walls
+// grow upward from the ground, floors spread from their centre).
+function drawPiece(type, mat, rot, px, y0, pz, s, cr, cg, cb, spin, tilt) {
+  const M = PIECE_MESH[mat];
+  if (type === 'wall') {
+    if (rot === 0) R.push(M.cube, px, y0 + LEV * s / 2, pz - GRID / 2, spin, tilt, GRID * s, LEV * s, 0.32, cr, cg, cb, 1);
+    else R.push(M.cube, px - GRID / 2, y0 + LEV * s / 2, pz, spin, tilt, 0.32, LEV * s, GRID * s, cr, cg, cb, 1);
+  } else if (type === 'floor') {
+    R.push(M.cube, px, y0 - 0.15, pz, spin, tilt, GRID * s, 0.3, GRID * s, cr, cg, cb, 1);
+  } else if (type === 'ramp') {
+    R.push(M.ramp, px, y0 + LEV * s / 2, pz, rot * Math.PI / 2 + spin, tilt, GRID * s, LEV * s, GRID * s, cr, cg, cb, 1);
+  } else {
+    R.push(M.cone, px, y0 + CONE_H * s / 2, pz, spin, tilt, GRID * s, CONE_H * s, GRID * s, cr, cg, cb, 1);
+  }
+}
+
+/* --------------------------------- weapons --------------------------------- */
+// Every gun is a small assembly of cubes and tubes whose silhouette identifies
+// it. Parts are [mesh, dx, dy, dz, sx, sy, sz, colour] in gun space with the
+// barrel along -Z; colour 'acc' takes the rarity tint, the rest gunmetal.
+const C = MESH_CUBE, T = MESH_TUBE;
+const GUN_MODEL = {
+  pistol: [
+    [C, 0, 0.05, -0.02, 0.10, 0.15, 0.40, 'dark'],   // slide
+    [T, 0, 0.04, -0.28, 0.06, 0.06, 0.20, 'metal'],  // barrel
+    [C, 0, -0.14, 0.13, 0.09, 0.26, 0.12, 'acc'],    // grip
+    [C, 0, -0.04, 0.02, 0.03, 0.07, 0.12, 'dark'],   // trigger guard
+  ],
+  smg: [
+    [C, 0, 0.07, 0.00, 0.13, 0.18, 0.56, 'dark'],    // receiver
+    [T, 0, 0.08, -0.44, 0.07, 0.07, 0.30, 'metal'],  // barrel
+    [T, 0, 0.08, -0.22, 0.14, 0.14, 0.26, 'acc'],    // shroud
+    [C, 0, -0.18, 0.04, 0.10, 0.32, 0.17, 'acc'],    // fat magazine
+    [C, 0, -0.12, 0.22, 0.09, 0.22, 0.11, 'dark'],   // grip
+    [C, 0, 0.06, 0.36, 0.09, 0.14, 0.20, 'dark'],    // stubby stock
+    [C, 0, 0.19, -0.05, 0.04, 0.06, 0.18, 'dark'],   // sight rail
+  ],
+  ar: [
+    [C, 0, 0.09, 0.00, 0.12, 0.20, 0.72, 'dark'],    // receiver
+    [T, 0, 0.10, -0.72, 0.06, 0.06, 0.60, 'metal'],  // barrel
+    [T, 0, 0.10, -0.44, 0.13, 0.13, 0.36, 'acc'],    // handguard
+    [C, 0, -0.17, -0.02, 0.09, 0.30, 0.13, 'acc'],   // magazine
+    [C, 0, -0.12, 0.16, 0.09, 0.22, 0.10, 'dark'],   // grip
+    [C, 0, 0.06, 0.52, 0.10, 0.19, 0.32, 'acc'],     // stock
+    [C, 0, 0.25, -0.08, 0.06, 0.09, 0.24, 'dark'],   // carry handle
+    [T, 0, 0.10, -1.03, 0.09, 0.09, 0.10, 'dark'],   // muzzle
+  ],
+  shotgun: [
+    [C, 0, 0.10, 0.02, 0.14, 0.20, 0.58, 'dark'],    // receiver
+    [T, 0, 0.17, -0.74, 0.09, 0.09, 0.90, 'metal'],  // barrel
+    [T, 0, 0.02, -0.34, 0.08, 0.08, 0.40, 'metal'],  // tube magazine
+    [T, 0, 0.02, -0.66, 0.13, 0.13, 0.34, 'acc'],    // pump
+    [C, 0, -0.12, 0.24, 0.09, 0.22, 0.12, 'dark'],   // grip
+    [C, 0, 0.03, 0.52, 0.12, 0.21, 0.40, 'acc'],     // wide stock
+  ],
+  sniper: [
+    [C, 0, 0.08, 0.00, 0.11, 0.18, 0.70, 'dark'],    // receiver
+    [T, 0, 0.09, -0.92, 0.05, 0.05, 1.00, 'metal'],  // very long barrel
+    [T, 0, 0.29, -0.10, 0.11, 0.11, 0.50, 'dark'],   // scope
+    [C, 0, 0.20, 0.02, 0.04, 0.10, 0.06, 'acc'],     // scope mount
+    [C, 0, 0.20, -0.22, 0.04, 0.10, 0.06, 'acc'],
+    [C, 0, -0.14, 0.00, 0.09, 0.22, 0.16, 'acc'],    // magazine
+    [C, 0, -0.12, 0.20, 0.09, 0.22, 0.10, 'dark'],   // grip
+    [C, 0, 0.03, 0.56, 0.11, 0.20, 0.46, 'acc'],     // long stock
+    [T, 0, 0.09, -1.46, 0.08, 0.08, 0.12, 'dark'],   // muzzle brake
+  ],
+  pickaxe: [
+    [C, 0, -0.10, 0.00, 0.06, 1.10, 0.06, 'wood'],   // handle, along Y
+    [C, 0, 0.50, 0.00, 0.07, 0.11, 0.62, 'metal'],   // head
+    [C, 0, 0.50, -0.40, 0.05, 0.08, 0.22, 'acc'],    // pick tip
+    [C, 0, 0.50, 0.36, 0.09, 0.14, 0.12, 'acc'],     // hammer end
+  ],
+};
+
+// base = 4x4 rigid transform (rotation + translation, uniform scale allowed);
+// every part is placed relative to it.
+function drawGunXf(id, base, acc, scale) {
+  const parts = GUN_MODEL[id];
+  if (!parts) return;
+  const m = _gm2, sc = scale || 1;
+  for (let i = 0; i < parts.length; i++) {
+    const q = parts[i];
+    const sx = q[4] * sc, sy = q[5] * sc, sz = q[6] * sc;
+    m[0] = base[0] * sx; m[1] = base[1] * sx; m[2] = base[2] * sx; m[3] = 0;
+    m[4] = base[4] * sy; m[5] = base[5] * sy; m[6] = base[6] * sy; m[7] = 0;
+    m[8] = base[8] * sz; m[9] = base[9] * sz; m[10] = base[10] * sz; m[11] = 0;
+    const dx = q[1] * sc, dy = q[2] * sc, dz = q[3] * sc;
+    m[12] = base[12] + base[0] * dx + base[4] * dy + base[8] * dz;
+    m[13] = base[13] + base[1] * dx + base[5] * dy + base[9] * dz;
+    m[14] = base[14] + base[2] * dx + base[6] * dy + base[10] * dz;
+    m[15] = 1;
+    const col = q[7] === 'acc' ? acc : q[7] === 'metal' ? COL_GUN_METAL : q[7] === 'wood' ? COL_WOOD_DARK : COL_GUN_DARK;
+    R.pushXf(q[0], m, col[0], col[1], col[2], 1);
+  }
+}
+
+// Rigid transform from position + yaw + pitch (same convention as Renderer.push).
+function m4YawPitch(o, x, y, z, yaw, pitch, s) {
+  const ca = Math.cos(yaw), sa = Math.sin(yaw), cb = Math.cos(pitch), sb = Math.sin(pitch);
+  o[0] = ca * s; o[1] = 0; o[2] = -sa * s; o[3] = 0;
+  o[4] = sa * sb * s; o[5] = cb * s; o[6] = ca * sb * s; o[7] = 0;
+  o[8] = sa * cb * s; o[9] = -sb * s; o[10] = ca * cb * s; o[11] = 0;
+  o[12] = x; o[13] = y; o[14] = z; o[15] = 1;
+  return o;
+}
+function drawGun(id, x, y, z, yaw, pitch, scale, acc) {
+  drawGunXf(id, m4YawPitch(_gm, x, y, z, yaw, pitch, 1), acc, scale);
+}
+
+function quatEuler(rx, ry, rz) {   // X then Y then Z
+  const cx = Math.cos(rx / 2), sx = Math.sin(rx / 2), cy = Math.cos(ry / 2), sy = Math.sin(ry / 2), cz = Math.cos(rz / 2), sz = Math.sin(rz / 2);
+  return [
+    sx * cy * cz + cx * sy * sz,
+    cx * sy * cz - sx * cy * sz,
+    cx * cy * sz + sx * sy * cz,
+    cx * cy * cz - sx * sy * sz,
+  ];
+}
+
+/* ---------------------------------- loot ----------------------------------- */
+
+const LOOT_SHAPE = {
+  ammo: [0.60, 0.44, 0.60],   // a squat crate
+  mats: [0.50, 0.50, 0.50],   // a cube
+  shield: [0.46, 0.90, 0.46],
+  medkit: [0.70, 0.52, 0.70],
+};
+
+function drawLoot(l) {
+  const col = lootColor(l);
+  // only settled loot bobs; airborne loot tumbles where the physics put it
+  const bob = l.rest ? Math.sin(G.t * 2.5 + l.spin) * 0.10 : 0;
+  const s = 1 + l.pop * 0.5;                       // little pop as it spawns
+  const spin = l.rest ? G.t * 1.2 + l.spin : G.t * 7 + l.spin;
+  const y = l.y + 0.45 + bob;
+  if (l.kind === 'weapon') {
+    drawGun(l.data.item.id, l.x, y, l.z, spin, l.rest ? 0.0 : G.t * 4, 0.85 * s, col);
+  } else if (l.kind === 'ammo') {
+    R.push(ITEM_MESH.ammo, l.x, y, l.z, spin, l.rest ? 0 : G.t * 4, 0.55 * s, 0.4 * s, 0.55 * s, col[0], col[1], col[2], 1);
+  } else if (l.kind === 'medkit') {
+    R.push(ITEM_MESH.medkit, l.x, y, l.z, spin, l.rest ? 0 : G.t * 4, 0.62 * s, 0.42 * s, 0.62 * s, 1, 1, 1, 1);
+  } else if (l.kind === 'shield') {
+    const m = Assets.get('bottle_a');
+    if (m) R.pushModel(m, l.x, y - 0.3, l.z, spin, 0.9 * s, 0.55, 0.9, 1.9, 1);
+    else R.push(MESH_CONE, l.x, y, l.z, spin, 0, 0.45 * s, 0.9 * s, 0.45 * s, col[0], col[1], col[2], 1);
+    R.push(MESH_SPHERE, l.x, y + 0.2, l.z, 0, 0, 1.1, 1.1, 1.1, 0.35, 0.6, 1.0, 0.12);
+  } else if (l.kind === 'mats') {
+    const m = Assets.get(l.data.mat === MAT_WOOD ? 'lumber' : l.data.mat === MAT_BRICK ? 'stone' : null);
+    if (m) R.pushModel(m, l.x, y - 0.3, l.z, spin, 0.8 * s, 1, 1, 1, 1);
+    else {
+      // metal: a little stack of bars
+      for (let i = 0; i < 3; i++) R.push(MESH_CUBE, l.x, y - 0.2 + i * 0.16, l.z, spin + i * 0.3, 0, 0.7 * s, 0.14 * s, 0.22 * s, col[0], col[1], col[2], 1);
+    }
+  }
+  // rarity beacon + ground disc
+  R.box(l.x, l.y + 2.0, l.z, 0.45, 3.6, 0.45, col, 0, 0.14);
+  R.push(MESH_CYL, l.x, l.y + 0.03, l.z, 0, 0, 0.7, 0.05, 0.7, col[0], col[1], col[2], 0.35);
+}
+
+/* ------------------------------- characters -------------------------------- */
+
+// Start (or restart) an upper-body one-shot: a gunshot, a swing, a reload…
+function playUpper(e, name, dur) {
+  e.upper = { name, t: 0, dur: dur || 0.4 };
+}
+
+const _maskCache = new Map();
+function upperMask(rig) {
+  let m = _maskCache.get(rig);
+  if (!m) { m = rigMask(rig, 'spine'); _maskCache.set(rig, m); }
+  return m;
+}
+
+// Which clips a character plays this frame, from what it is doing.
+function updateAnim(e, dt) {
+  if (!e.anim) {
+    const m = Assets.get(e.skin);
+    if (!m || !m.skinned) return;
+    e.anim = new Animator(m.rig);
+    e.anim.play('Idle', 0, true);
+  }
+  const a = e.anim;
+  if (!e.alive) { a.update(dt); return; }
+  const vx = e.vel[0], vz = e.vel[2];
+  const speed = len2(vx, vz);
+  const fx = -Math.sin(e.yaw), fz = -Math.cos(e.yaw), rx = Math.cos(e.yaw), rz = -Math.sin(e.yaw);
+  const vf = vx * fx + vz * fz, vr = vx * rx + vz * rz;
+  const it = curItem(e);
+  const gun = it && WEAPONS[it.id] && WEAPONS[it.id].ammo ? it.id : null;
+  let name, loop = true, spd = 1;
+  if (G.state === 'drop' && !e.landed && e !== G.player || (G.state === 'drop' && e === G.player)) {
+    name = e.glide ? 'Jump_Idle' : 'Jump_Idle';
+  } else if (!e.grounded) {
+    name = e.vel[1] > 2 ? 'Jump_Start' : 'Jump_Idle';
+    loop = name === 'Jump_Idle';
+  } else if (speed > 1.0) {
+    if (Math.abs(vr) > Math.abs(vf) * 1.2 && speed > 3) name = vr > 0 ? 'Running_Strafe_Right' : 'Running_Strafe_Left';
+    else if (vf < -0.5) name = 'Walking_Backwards';
+    else name = speed > 8.5 ? 'Running_A' : speed > 4.5 ? 'Running_A' : 'Walking_A';
+    spd = name === 'Walking_A' || name === 'Walking_Backwards' ? clamp(speed / 3.2, 0.7, 1.6) : clamp(speed / 7.0, 0.7, 1.7);
+  } else name = gun && !e.buildMode ? 'Idle' : 'Idle';
+  a.speed = spd;
+  a.play(name, 0.12, loop);
+  a.update(dt);
+  if (e.upper) { e.upper.t += dt; if (e.upper.t >= e.upper.dur) e.upper = null; }
+}
+
+function drawChar(e) {
+  const mdl = Assets.get(e.skin);
+  if (!mdl || !mdl.skinned || !e.anim) { drawCharBoxes(e); return; }
+  const a = e.anim, rig = a.rig;
+  const it = curItem(e);
+  const gun = it && WEAPONS[it.id] && WEAPONS[it.id].ammo ? it.id : null;
+  // upper-body layer: the held weapon's pose, or a one-shot on top of it
+  let upper = null;
+  if (e.alive) {
+    if (e.upper) upper = { name: e.upper.name, time: e.upper.t, weight: 1, mask: upperMask(rig), loop: false };
+    else if (gun && !e.buildMode) upper = { name: gun === 'pistol' ? '1H_Ranged_Aiming' : '2H_Ranged_Aiming', time: G.t * 0.5 + e.animPhase, weight: 1, mask: upperMask(rig), loop: true };
+  }
+  const pose = a.evalPose(upper);
+  // bend the chest toward the aim pitch (and the head a little more)
+  if (e.alive && (gun || e.buildMode || e.slot === 0)) {
+    const chest = rig.names.chest, head = rig.names.head;
+    const ang = e.pitch * PITCH_K;
+    if (chest !== undefined) poseRotateLocal(pose, chest, Math.sin(ang * 0.5), 0, 0, Math.cos(ang * 0.5));
+    if (head !== undefined) poseRotateLocal(pose, head, Math.sin(ang * 0.25), 0, 0, Math.cos(ang * 0.25));
+  }
+  const joints = a.finish();
+  const sc = CHAR_HEIGHT / mdl.h;
+  const x = e.pos[0], y = e.pos[1] - mdl.by * sc, z = e.pos[2];
+  m4Place(e.xf, x, y, z, e.yaw + CHAR_YAW, sc);
+  const hurt = e.hurtT > 0;
+  const t = hurt ? COL_HURT_TEX : COL_WHITE;
+  R.pushSkinned(mdl, e.xf, joints, t[0], t[1], t[2], 1);
+
+  // held item, glued to the right hand slot
+  if (e.alive) {
+    const hs = rig.names['handslot.r'];
+    if (hs !== undefined && !e.buildMode && it) {
+      m4Mul(_gm, e.xf, a.nodeWorld(hs));
+      const grip = GUN_GRIP[it.id] || GUN_GRIP.default;
+      m4YawPitch(_gm3, 0, 0, 0, e.yaw, it.id === 'pickaxe' ? 0 : -e.pitch, 1);
+      const gs = GUN_SCALE;
+      _gm3[12] = _gm[12] - (_gm3[0] * grip[0] + _gm3[4] * grip[1] + _gm3[8] * grip[2]) * gs;
+      _gm3[13] = _gm[13] - (_gm3[1] * grip[0] + _gm3[5] * grip[1] + _gm3[9] * grip[2]) * gs;
+      _gm3[14] = _gm[14] - (_gm3[2] * grip[0] + _gm3[6] * grip[1] + _gm3[10] * grip[2]) * gs;
+      drawGunXf(it.id, _gm3, it.id === 'pickaxe' ? COL_GUN_METAL : RARITY[it.rar].col, gs);
+      if (e.muzzleT > 0 && gun) {
+        const mz = -1.0;   // muzzle along the gun's -Z
+        const mx = _gm3[12] + _gm3[8] * mz, my = _gm3[13] + _gm3[9] * mz, mzz = _gm3[14] + _gm3[10] * mz;
+        R.push(MESH_SPHERE, mx, my, mzz, 0, 0, 0.5, 0.5, 0.5, 1.0, 0.85, 0.4, 0.85);
+      }
+    } else if (e.buildMode) {
+      const rx = Math.cos(e.yaw), rz = -Math.sin(e.yaw), fx = -Math.sin(e.yaw), fz = -Math.cos(e.yaw);
+      R.push(PIECE_MESH[e.buildMat].cube, x + rx * 0.4 + fx * 0.5, e.pos[1] + 1.2, z + rz * 0.4 + fz * 0.5, e.yaw, 0, 0.3, 0.3, 0.3, 1, 1, 1, 1);
+    }
+  }
+  if (e.glide) drawGlider(e);
+}
+
+// Fallback figure while a character file is still loading (or missing).
+function drawCharBoxes(e) {
+  const x = e.pos[0], y = e.pos[1], z = e.pos[2], yaw = e.yaw;
+  const hurt = e.hurtT > 0;
+  const body = hurt ? COL_HURT : e.color;
+  _dark[0] = body[0] * 0.55; _dark[1] = body[1] * 0.55; _dark[2] = body[2] * 0.55;
+  const dark = _dark;
+  R.box(x, y + 0.42, z, 0.5, 0.84, 0.34, dark, yaw);
+  R.box(x, y + 1.14, z, 0.72, 0.72, 0.42, body, yaw);
+  R.box(x, y + 1.68, z, 0.44, 0.44, 0.44, COL_SKIN, yaw);
+  const rx = Math.cos(yaw), rz = -Math.sin(yaw), fx = -Math.sin(yaw), fz = -Math.cos(yaw);
+  const it = curItem(e);
+  if (it && e.alive) drawGun(it.id, x + rx * 0.36 + fx * 0.8, y + 1.28, z + rz * 0.36 + fz * 0.8, yaw, -e.pitch, 0.9, it.id === 'pickaxe' ? COL_GUN_METAL : RARITY[it.rar].col);
+  if (e.glide) drawGlider(e);
+}
+
+function drawGlider(e) {
+  const x = e.pos[0], y = e.pos[1], z = e.pos[2];
+  R.push(MESH_SPHERE, x, y + 3.0, z, e.yaw, 0, 3.6, 1.1, 3.6, COL_GLIDER[0], COL_GLIDER[1], COL_GLIDER[2], 1);
+  R.push(MESH_SPHERE, x, y + 2.98, z, e.yaw, 0, 3.7, 0.5, 3.7, 0.25, 0.55, 0.95, 1);
+  R.box(x, y + 2.4, z, 0.1, 1.0, 0.1, COL_GLIDER_POLE, e.yaw);
+  for (const [dx, dz] of [[1.4, 1.4], [-1.4, 1.4], [1.4, -1.4], [-1.4, -1.4]]) {
+    R.line(x, y + 1.6, z, x + dx, y + 2.9, z + dz, 0.03, COL_GLIDER_POLE, 1);
+  }
+}
+
+// In first person the body is hidden; the held gun floats at the bottom right
+// of the view, pitching with the camera.
+function drawFirstPersonGun(p, cam) {
+  const it = curItem(p);
+  if (!it || p.buildMode) return;
+  const d = dirFrom(p.yaw, p.pitch, _av);
+  const rx = Math.cos(p.yaw), rz = -Math.sin(p.yaw);
+  const ux = -d[1] * d[0], uy = Math.cos(p.pitch), uz = -d[1] * d[2];
+  const kick = p.fireT > 0 ? 0.06 : 0;
+  const x = cam.x + d[0] * (0.55 + kick) + rx * 0.30 - ux * 0.26, y = cam.y + d[1] * (0.55 + kick) - uy * 0.26, z = cam.z + d[2] * (0.55 + kick) + rz * 0.30 - uz * 0.26;
+  drawGun(it.id, x, y, z, p.yaw, -p.pitch, 0.75, it.id === 'pickaxe' ? COL_GUN_METAL : RARITY[it.rar].col);
+}
+
+function drawBus(b) {
+  const yaw = Math.atan2(-b.dx, -b.dz);
+  const x = b.x, y = b.y, z = b.z;
+  R.push(ITEM_MESH.bus, x, y, z, yaw, 0, 4.0, 3.2, 12, 1, 1, 1, 1);          // body
+  R.push(MESH_CUBE, x, y + 1.7, z, yaw, 0, 3.6, 0.3, 11.5, 0.9, 0.92, 0.96, 1);  // roof
+  for (const [dx, dz] of [[1.9, 4], [-1.9, 4], [1.9, -4], [-1.9, -4]]) {
+    const wx = x + Math.cos(yaw) * dx - Math.sin(yaw) * dz, wz = z - Math.sin(yaw) * dx - Math.cos(yaw) * dz;
+    R.push(MESH_TUBE, wx, y - 1.5, wz, yaw + Math.PI / 2, 0, 1.3, 1.3, 0.5, 0.1, 0.1, 0.12, 1);
+  }
+  R.push(MESH_SPHERE, x, y + 11, z, 0, 0, 9.5, 9.5, 9.5, COL_BALLOON[0], COL_BALLOON[1], COL_BALLOON[2], 1);
+  R.push(MESH_SPHERE, x, y + 11, z, 0, 0, 9.8, 6.0, 9.8, 0.95, 0.55, 0.2, 1);
+  for (const [dx, dz] of [[1.5, 4], [-1.5, 4], [1.5, -4], [-1.5, -4]]) {
+    const wx = x + Math.cos(yaw) * dx - Math.sin(yaw) * dz, wz = z - Math.sin(yaw) * dx - Math.cos(yaw) * dz;
+    R.line(wx, y + 1.8, wz, x + (wx - x) * 0.4, y + 7, z + (wz - z) * 0.4, 0.05, COL_GLIDER_POLE, 1);
+  }
+  R.push(MESH_SPHERE, x, y + 4.5, z, 0, 0, 1.6, 1.6, 1.6, 1.0, 0.7, 0.3, 0.9);   // burner
+}
+
+/* ----------------------------------- HUD ----------------------------------- */
+
+function drawHUD() {
+  // Work in a virtual 1400-wide-ish space so the HUD never collides with itself
+  // on small windows.
+  const S = clamp(hudCv.width / 1400, 0.5, 1.15);
+  hud.setTransform(S, 0, 0, S, 0, 0);
+  const W = hudCv.width / S, H = hudCv.height / S;
+  hud.clearRect(0, 0, W, H);
+  if (window.__AUTO) hud.drawImage(R.canvas, 0, 0, W, H);   // screenshot mode: composite the GL frame ourselves
+  hud.textBaseline = 'middle';
+  const p = G.player;
+  if (G.state === 'menu') return;
+
+  drawVignette(W, H);
+  if (G.hurtFlash > 0) {
+    hud.fillStyle = `rgba(200,20,20,${G.hurtFlash * 0.35})`;
+    hud.fillRect(0, 0, W, H);
+  }
+
+  if (G.state === 'drop' || G.state === 'play' || G.state === 'dead' || G.state === 'win') {
+    drawTopRight(W, H);
+    drawCompass(W, H);
+    drawFeed(W, H);
+    if (p.alive) { drawBars(W, H); drawSlots(W, H); drawMats(W, H); drawCrosshair(W, H); drawTargetInfo(W, H); }
+    if (G.state === 'play') drawLootLabels();
+    drawDamageNumbers(W, H);
+    if (G.msgT > 0) {
+      hud.globalAlpha = clamp(G.msgT, 0, 1);
+      hud.font = '800 24px system-ui, sans-serif';
+      hud.textAlign = 'center';
+      hud.fillStyle = '#fff'; hud.strokeStyle = 'rgba(0,0,0,.65)'; hud.lineWidth = 5;
+      hud.strokeText(G.msg, W / 2, H * 0.18);
+      hud.fillText(G.msg, W / 2, H * 0.18);
+      hud.globalAlpha = 1;
+    }
+    if (G.elimFlash > 0) {
+      hud.globalAlpha = clamp(G.elimFlash, 0, 1);
+      hud.font = '900 36px system-ui, sans-serif'; hud.textAlign = 'center';
+      hud.fillStyle = '#ffdd55'; hud.strokeStyle = 'rgba(0,0,0,.6)'; hud.lineWidth = 5;
+      hud.strokeText('ELIMINATED', W / 2, H * 0.30);
+      hud.fillText('ELIMINATED', W / 2, H * 0.30);
+      hud.globalAlpha = 1;
+    }
+  }
+
+  if (G.state === 'drop') {
+    hud.font = '700 16px system-ui, sans-serif'; hud.textAlign = 'center'; hud.fillStyle = '#fff';
+    const how = Input.padActive ? 'push the left stick to dive and steer' : 'W to dive, mouse to steer';
+    hud.fillText(p.pos[1] - terrainHeight(p.pos[0], p.pos[2]) > 45 ? 'FREEFALL — ' + how : 'GLIDING', W / 2, H - 150);
+  }
+  if (Input.padActive) {
+    hud.font = '700 11px system-ui, sans-serif'; hud.textAlign = 'right';
+    hud.fillStyle = 'rgba(255,255,255,.42)';
+    hud.fillText('GAMEPAD · BUILDER PRO', W - 26, H - 20);
+  }
+  if (!Input.locked && !Input.padActive && !window.__NOLOCK && (G.state === 'play' || G.state === 'drop')) {
+    hud.fillStyle = 'rgba(0,0,0,.55)'; hud.fillRect(0, 0, W, H);
+    hud.font = '700 26px system-ui, sans-serif'; hud.textAlign = 'center'; hud.fillStyle = '#fff';
+    hud.fillText('CLICK TO RESUME', W / 2, H / 2);
+  }
+}
+
+let _vig = null, _vigKey = '';
+function drawVignette(W, H) {
+  const inStormNow = G.storm && G.player && inStorm(G.player.pos[0], G.player.pos[2]) && G.state === 'play';
+  const key = W + 'x' + H + (inStormNow ? 's' : '');
+  if (key !== _vigKey) {
+    _vig = hud.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.45, W / 2, H / 2, Math.max(W, H) * 0.75);
+    _vig.addColorStop(0, 'rgba(0,0,0,0)');
+    _vig.addColorStop(1, inStormNow ? 'rgba(90,20,150,.55)' : 'rgba(0,0,0,.32)');
+    _vigKey = key;
+  }
+  hud.fillStyle = _vig;
+  hud.fillRect(0, 0, W, H);
+}
+
+function bar(x, y, w, h, k, col, bg) {
+  hud.fillStyle = bg || 'rgba(0,0,0,.55)';
+  hud.fillRect(x, y, w, h);
+  hud.fillStyle = col;
+  hud.fillRect(x + 2, y + 2, Math.max(0, (w - 4) * clamp(k, 0, 1)), h - 4);
+  hud.strokeStyle = 'rgba(255,255,255,.35)'; hud.lineWidth = 1.5;
+  hud.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+}
+
+function drawBars(W, H) {
+  const p = G.player, x = 26, w = 300, h = 20;
+  let y = H - 152;   // sits above the hotbar, never under it
+  bar(x, y, w, h, p.shield / 100, '#3fb8ff');
+  y += h + 4;
+  bar(x, y, w, h, p.hp / 100, p.hp > 50 ? '#5ee06a' : '#e05e5e');
+  hud.font = '800 15px system-ui, sans-serif'; hud.textAlign = 'left'; hud.fillStyle = '#fff';
+  hud.fillText(Math.ceil(p.shield) + '', x + w + 10, y - h / 2 - 2);
+  hud.fillText(Math.ceil(p.hp) + '', x + w + 10, y + h / 2);
+  if (p.useT > 0) {
+    bar(W / 2 - 110, H - 200, 220, 14, 1 - p.useT / (p.useKind === 'shield' ? 2.2 : 3.6), '#ffffff');
+    hud.textAlign = 'center'; hud.fillStyle = '#fff';
+    hud.fillText('USING ' + p.useKind.toUpperCase(), W / 2, H - 215);
+  }
+}
+
+// Small vector icons for the hotbar. Side view, barrel to the right.
+function drawItemIcon(id, x, y, w, h, col) {
+  hud.save();
+  hud.translate(x, y);
+  hud.fillStyle = col;
+  const u = w / 20, v = h / 12;
+  const rect = (a, b, c, d) => hud.fillRect(a * u, b * v, c * u, d * v);
+  if (id === 'pickaxe') { hud.strokeStyle = col; hud.lineWidth = 2; hud.beginPath(); hud.moveTo(3 * u, 11 * v); hud.lineTo(15 * u, 2 * v); hud.stroke(); rect(11, 0, 9, 2.4); rect(16, 0, 2.4, 6); }
+  else if (id === 'pistol') { rect(4, 3, 12, 3); rect(5, 6, 3.5, 5); rect(15, 3.6, 4, 1.8); }
+  else if (id === 'smg') { rect(3, 4, 12, 3); rect(6, 7, 3, 4.5); rect(15, 4.4, 4, 1.6); rect(1, 4.4, 2.5, 2); rect(10, 2.5, 3, 1.5); }
+  else if (id === 'ar') { rect(4, 4, 11, 3); rect(9, 7, 2.6, 4); rect(15, 4.6, 5, 1.6); rect(0, 4.5, 4, 2.2); rect(8, 2.6, 4, 1.4); }
+  else if (id === 'shotgun') { rect(4, 4.5, 10, 2.6); rect(14, 4.6, 6, 2); rect(0, 4.8, 4, 2.6); rect(11, 7, 3, 1.6); }
+  else if (id === 'sniper') { rect(3, 5, 10, 2.4); rect(13, 5.4, 7, 1.4); rect(0, 5.2, 3, 2.2); rect(7, 2.6, 5, 1.8); rect(6, 7.4, 2, 3); }
+  else if (id === 'shield') { rect(8, 4, 4, 7); rect(8.8, 1.5, 2.4, 2.8); hud.fillStyle = '#fff'; rect(8.8, 6, 1, 3); }
+  else if (id === 'medkit') { rect(4, 3, 12, 8); hud.fillStyle = '#e33'; rect(9, 4, 2, 6); rect(6.5, 6, 7, 2); }
+  hud.restore();
+}
+
+function drawSlots(W, H) {
+  const p = G.player;
+  const sw = 84, sh = 58, gap = 6;
+  const total = 5 * sw + 4 * gap;
+  const x0 = W / 2 - total / 2, y = H - 78;
+  for (let i = 0; i < 5; i++) {
+    const x = x0 + i * (sw + gap);
+    const it = p.inv[i];
+    const sel = i === p.slot && !p.buildMode;
+    hud.fillStyle = sel ? 'rgba(255,255,255,.28)' : 'rgba(0,0,0,.5)';
+    hud.fillRect(x, y, sw, sh);
+    hud.strokeStyle = sel ? '#fff' : 'rgba(255,255,255,.25)';
+    hud.lineWidth = 2; hud.strokeRect(x, y, sw, sh);
+    hud.textAlign = 'center';
+    if (it) {
+      const c = RARITY[it.rar].col;
+      const css = `rgb(${c[0] * 255 | 0},${c[1] * 255 | 0},${c[2] * 255 | 0})`;
+      hud.fillStyle = css;
+      hud.fillRect(x + 2, y + sh - 6, sw - 4, 4);
+      drawItemIcon(it.id, x + sw / 2 - 20, y + 6, 40, 24, it.id === 'pickaxe' ? '#ddd' : css);
+      hud.fillStyle = '#fff'; hud.font = '700 10px system-ui, sans-serif';
+      const nm = it.id === 'pickaxe' ? 'PICKAXE' : it.id === 'shield' ? 'SHIELD' : it.id === 'medkit' ? 'MEDKIT'
+        : WEAPONS[it.id].name.toUpperCase();
+      if (WEAPONS[it.id] && WEAPONS[it.id].ammo) {
+        hud.font = '800 14px system-ui, sans-serif';
+        hud.fillText(it.mag + ' / ' + p.ammo[WEAPONS[it.id].ammo], x + sw / 2, y + 42);
+      } else hud.fillText(nm.slice(0, 12), x + sw / 2, y + 42);
+    }
+    hud.fillStyle = 'rgba(255,255,255,.6)'; hud.font = '700 10px system-ui, sans-serif';
+    hud.textAlign = 'left'; hud.fillText(i + 1, x + 5, y + 9);
+    // drop hint on the held slot
+    if (i === p.slot && i > 0 && it && !p.buildMode) {
+      hud.fillStyle = 'rgba(255,255,255,.55)'; hud.font = '700 10px system-ui, sans-serif';
+      hud.textAlign = 'center'; hud.fillText('[G] DROP', x + sw / 2, y + sh + 11);
+    }
+  }
+  if (p.reloadT > 0) {
+    const it = curItem(p);
+    bar(W / 2 - 90, y - 26, 180, 12, 1 - p.reloadT / WEAPONS[it.id].reload, '#ffcc44');
+    hud.textAlign = 'center'; hud.fillStyle = '#fff'; hud.font = '700 12px system-ui, sans-serif';
+    hud.fillText('RELOADING', W / 2, y - 36);
+  }
+  // build bar
+  if (p.buildMode) {
+    const bw = 74, by = y - 104;
+    const bx0 = W / 2 - (4 * bw + 3 * gap) / 2;
+    const labels = ['WALL [Z]', 'FLOOR [X]', 'RAMP [C]', 'CONE [V]'];
+    for (let i = 0; i < 4; i++) {
+      const x = bx0 + i * (bw + gap);
+      hud.fillStyle = i === p.buildType ? 'rgba(90,200,255,.45)' : 'rgba(0,0,0,.5)';
+      hud.fillRect(x, by, bw, 46);
+      hud.strokeStyle = i === p.buildType ? '#7fd8ff' : 'rgba(255,255,255,.25)';
+      hud.lineWidth = 2; hud.strokeRect(x, by, bw, 46);
+      // piece glyph
+      hud.fillStyle = i === p.buildType ? '#fff' : 'rgba(255,255,255,.7)';
+      const gx = x + bw / 2, gy = by + 14;
+      if (i === 0) hud.fillRect(gx - 9, gy - 8, 18, 14);
+      else if (i === 1) hud.fillRect(gx - 12, gy + 1, 24, 5);
+      else if (i === 2) { hud.beginPath(); hud.moveTo(gx - 12, gy + 7); hud.lineTo(gx + 12, gy - 8); hud.lineTo(gx + 12, gy + 7); hud.closePath(); hud.fill(); }
+      else { hud.beginPath(); hud.moveTo(gx - 13, gy + 7); hud.lineTo(gx, gy - 8); hud.lineTo(gx + 13, gy + 7); hud.closePath(); hud.fill(); }
+      hud.font = '700 10px system-ui, sans-serif'; hud.textAlign = 'center';
+      hud.fillText(labels[i], x + bw / 2, by + 35);
+    }
+  }
+}
+
+function drawMats(W, H) {
+  const p = G.player;
+  const x = W - 200, y = H - 168;
+  for (let i = 0; i < 3; i++) {
+    const c = MAT_COLOR[i];
+    const yy = y + i * 26;
+    hud.fillStyle = `rgba(0,0,0,${i === p.buildMat ? 0.7 : 0.4})`;
+    hud.fillRect(x, yy, 176, 24);
+    hud.fillStyle = `rgb(${c[0] * 255 | 0},${c[1] * 255 | 0},${c[2] * 255 | 0})`;
+    hud.fillRect(x + 4, yy + 4, 16, 16);
+    hud.fillStyle = i === p.buildMat ? '#fff' : 'rgba(255,255,255,.6)';
+    hud.font = '700 13px system-ui, sans-serif'; hud.textAlign = 'left';
+    hud.fillText(MAT_NAME[i] + '  ' + p.mats[i], x + 28, yy + 13);
+    if (i === p.buildMat) {
+      hud.textAlign = 'right'; hud.fillText('[T]', x + 170, yy + 13);
+    }
+  }
+}
+
+function drawCrosshair(W, H) {
+  const p = G.player;
+  if (p.buildMode) {
+    hud.fillStyle = 'rgba(255,255,255,.8)';
+    hud.fillRect(W / 2 - 2, H / 2 - 2, 4, 4);
+    return;
+  }
+  const it = curItem(p);
+  const w = it && WEAPONS[it.id] ? WEAPONS[it.id].spread : 0.02;
+  const move = len2(p.vel[0], p.vel[2]) > 3 ? 1.6 : 1;
+  const spread = clamp(w * 900 * move * (p.ads ? 0.45 : 1), 4, 60);
+  const cx = W / 2, cy = H / 2;
+  hud.strokeStyle = 'rgba(255,255,255,.9)'; hud.lineWidth = 2;
+  hud.beginPath();
+  for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+    hud.moveTo(cx + dx * spread, cy + dy * spread);
+    hud.lineTo(cx + dx * (spread + 8), cy + dy * (spread + 8));
+  }
+  hud.stroke();
+  hud.fillStyle = 'rgba(255,255,255,.9)';
+  hud.fillRect(cx - 1, cy - 1, 2, 2);
+  if (G.hitMark > 0) {
+    hud.strokeStyle = G.critMark > 0 ? '#ffd24a' : '#fff';
+    hud.lineWidth = 3; hud.beginPath();
+    hud.moveTo(cx - 10, cy - 10); hud.lineTo(cx - 4, cy - 4);
+    hud.moveTo(cx + 10, cy - 10); hud.lineTo(cx + 4, cy - 4);
+    hud.moveTo(cx - 10, cy + 10); hud.lineTo(cx - 4, cy + 4);
+    hud.moveTo(cx + 10, cy + 10); hud.lineTo(cx + 4, cy + 4);
+    hud.stroke();
+  }
+}
+
+// What the crosshair rests on: a build piece or prop shows its name and health
+// (so you know what a wall has left before you push through it).
+function drawTargetInfo(W, H) {
+  const p = G.player;
+  if (G.state !== 'play') return;
+  const cam = cameraState(p);
+  const d = dirFrom(p.yaw, p.pitch, _av);
+  const hit = rayWorld(cam.x, cam.y, cam.z, d[0], d[1], d[2], 16);
+  if (!hit || !hit.col.ref) return;
+  const c = hit.col;
+  let name, hp, max;
+  if (c.kind === 'piece') { name = MAT_NAME[c.ref.mat].toUpperCase() + ' ' + c.ref.type.toUpperCase(); hp = c.ref.hp; max = c.ref.maxHp; }
+  else if (c.kind === 'prop') { name = c.ref.kind.replace('_', ' ').toUpperCase(); hp = c.ref.hp; max = c.ref.maxHp; }
+  else return;
+  const w = 150, x = W / 2 - w / 2, y = H / 2 + 34;
+  hud.fillStyle = 'rgba(0,0,0,.45)'; hud.fillRect(x, y, w, 30);
+  hud.font = '700 11px system-ui, sans-serif'; hud.textAlign = 'center'; hud.fillStyle = 'rgba(255,255,255,.9)';
+  hud.fillText(name, W / 2, y + 9);
+  bar(x + 8, y + 17, w - 16, 8, hp / max, c.kind === 'piece' ? '#7fd8ff' : '#ffd24a', 'rgba(0,0,0,.4)');
+}
+
+function drawCompass(W, H) {
+  const p = G.player;
+  const cx = W / 2, y = 22, span = 260;
+  hud.fillStyle = 'rgba(0,0,0,.35)'; hud.fillRect(cx - span / 2, y - 12, span, 26);
+  const heading = -p.yaw;   // north is -Z
+  hud.font = '700 11px system-ui, sans-serif'; hud.textAlign = 'center';
+  const labels = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+  for (let i = 0; i < 8; i++) {
+    const a = i * Math.PI / 4;
+    let d = angleDelta(heading, a);
+    if (Math.abs(d) > 1.1) continue;
+    const x = cx + d / 1.1 * (span / 2);
+    const k = 1 - Math.abs(d) / 1.1;
+    hud.fillStyle = `rgba(255,255,255,${0.35 + 0.65 * k})`;
+    hud.fillText(labels[i], x, y + 1);
+  }
+  // nearest POI name under the compass
+  let best = null, bd = 1e9;
+  for (const q of World.pois) { const d = dist2(p.pos[0], p.pos[2], q.x, q.z); if (d < bd) { bd = d; best = q; } }
+  if (best && bd < 90 * 90) {
+    hud.fillStyle = 'rgba(255,255,255,.85)'; hud.font = '800 13px system-ui, sans-serif';
+    hud.fillText(best.name.toUpperCase(), cx, y + 26);
+  }
+  hud.fillStyle = '#ffd24a'; hud.fillRect(cx - 1, y - 12, 2, 6);
+}
+
+// Terrain + roads + POIs painted once per match; the minimap just blits it.
+function buildMinimap() {
+  const S = 256, c = document.createElement('canvas');
+  c.width = c.height = S;
+  const ctx = c.getContext('2d');
+  const img = ctx.createImageData(S, S), d = img.data;
+  for (let j = 0; j < S; j++) {
+    for (let i = 0; i < S; i++) {
+      const x = -HALF + (i + 0.5) / S * 2 * HALF, z = -HALF + (j + 0.5) / S * 2 * HALF;
+      const h = terrainHeight(x, z);
+      const k = clamp((h - TERRAIN_MIN) / (TERRAIN_MAX - TERRAIN_MIN + 1), 0, 1);
+      const slope = Math.abs(terrainHeight(x + 3, z) - h) + Math.abs(terrainHeight(x, z + 3) - h);
+      let r = 60 + k * 70, g = 110 + k * 60, b = 55 + k * 30;
+      if (slope > 1.6) { r = 110; g = 105; b = 95; }
+      if (nearRoad(x, z, 4)) { r = 150; g = 130; b = 100; }
+      const o = (j * S + i) * 4;
+      d[o] = r; d[o + 1] = g; d[o + 2] = b; d[o + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  ctx.fillStyle = 'rgba(255,255,255,.85)';
+  for (const q of World.pois) {
+    const x = (q.x + HALF) / (2 * HALF) * S, z = (q.z + HALF) / (2 * HALF) * S;
+    ctx.beginPath(); ctx.arc(x, z, 2.2, 0, Math.PI * 2); ctx.fill();
+  }
+  return c;
+}
+
+function drawTopRight(W, H) {
+  const s = G.storm, p = G.player;
+  const R2 = 84, cx = W - R2 - 30, cy = R2 + 34;
+  hud.save();
+  hud.beginPath(); hud.arc(cx, cy, R2, 0, Math.PI * 2); hud.clip();
+  if (G.mini) hud.drawImage(G.mini, cx - R2, cy - R2, R2 * 2, R2 * 2);
+  else { hud.fillStyle = '#2c4a2c'; hud.fillRect(cx - R2, cy - R2, R2 * 2, R2 * 2); }
+  const k = R2 / HALF;
+  // storm + next circle
+  hud.fillStyle = 'rgba(150,60,230,.34)';
+  hud.fillRect(cx - R2, cy - R2, R2 * 2, R2 * 2);
+  hud.globalCompositeOperation = 'destination-out';
+  hud.beginPath(); hud.arc(cx + s.cx * k, cy + s.cz * k, s.r * k, 0, Math.PI * 2); hud.fill();
+  hud.globalCompositeOperation = 'source-over';
+  if (G.mini) {
+    hud.save(); hud.beginPath(); hud.arc(cx + s.cx * k, cy + s.cz * k, s.r * k, 0, Math.PI * 2); hud.clip();
+    hud.drawImage(G.mini, cx - R2, cy - R2, R2 * 2, R2 * 2); hud.restore();
+  }
+  hud.strokeStyle = 'rgba(255,255,255,.85)'; hud.lineWidth = 1.5;
+  hud.beginPath(); hud.arc(cx + s.tcx * k, cy + s.tcz * k, s.tr * k, 0, Math.PI * 2); hud.stroke();
+  hud.strokeStyle = 'rgba(180,90,255,.9)'; hud.lineWidth = 2;
+  hud.beginPath(); hud.arc(cx + s.cx * k, cy + s.cz * k, s.r * k, 0, Math.PI * 2); hud.stroke();
+  // player arrow
+  const px = cx + p.pos[0] * k, pz = cy + p.pos[2] * k;
+  hud.save(); hud.translate(px, pz); hud.rotate(-p.yaw);
+  hud.fillStyle = '#fff'; hud.strokeStyle = 'rgba(0,0,0,.6)'; hud.lineWidth = 1.5; hud.beginPath();
+  hud.moveTo(0, -6); hud.lineTo(4.5, 5); hud.lineTo(-4.5, 5); hud.closePath(); hud.fill(); hud.stroke();
+  hud.restore();
+  hud.restore();
+  hud.strokeStyle = 'rgba(255,255,255,.55)'; hud.lineWidth = 2;
+  hud.beginPath(); hud.arc(cx, cy, R2, 0, Math.PI * 2); hud.stroke();
+
+  hud.textAlign = 'right';
+  hud.font = '800 20px system-ui, sans-serif'; hud.fillStyle = '#fff';
+  hud.fillText(G.alive + ' ALIVE', W - 30, cy + R2 + 22);
+  hud.font = '700 13px system-ui, sans-serif';
+  hud.fillStyle = s.shrinking ? '#c98bff' : 'rgba(255,255,255,.75)';
+  const t = Math.max(0, s.timer);
+  const mm = Math.floor(t / 60), ss = Math.floor(t % 60);
+  hud.fillText((s.shrinking ? 'STORM MOVING  ' : 'STORM IN  ') + mm + ':' + String(ss).padStart(2, '0'),
+    W - 30, cy + R2 + 44);
+  hud.fillStyle = 'rgba(255,255,255,.75)';
+  hud.fillText('ELIMS  ' + G.player.kills, W - 30, cy + R2 + 64);
+}
+
+function drawFeed(W, H) {
+  hud.textAlign = 'right'; hud.font = '600 13px system-ui, sans-serif';
+  for (let i = 0; i < G.feed.length; i++) {
+    const f = G.feed[i];
+    hud.globalAlpha = clamp(f.t, 0, 1);
+    hud.fillStyle = 'rgba(0,0,0,.45)';
+    const text = f.a + '  ⚔  ' + f.b;
+    const w = hud.measureText(text).width + 16;
+    hud.fillRect(W - 30 - w, 300 + i * 24, w, 20);
+    hud.fillStyle = f.a === 'You' ? '#ffd24a' : '#fff';
+    hud.fillText(text, W - 38, 310 + i * 24);
+  }
+  hud.globalAlpha = 1;
+}
+
+/* -------------------------- loot identification ---------------------------- */
+
+function lootColor(l) {
+  return l.kind === 'weapon' ? RARITY[l.data.item.rar].col
+    : l.kind === 'ammo' ? AMMO_COLOR[l.data.type]
+      : l.kind === 'mats' ? MAT_COLOR[l.data.mat]
+        : l.kind === 'shield' ? COL_SHIELD : COL_MEDKIT;
+}
+
+function lootName(l) {
+  if (l.kind === 'weapon') return weaponLabel(l.data.item).toUpperCase();
+  if (l.kind === 'ammo') return l.data.n + ' ' + l.data.type.toUpperCase();
+  if (l.kind === 'mats') return l.data.n + ' ' + MAT_NAME[l.data.mat].toUpperCase();
+  if (l.kind === 'shield') return 'SHIELD POTION';
+  if (l.kind === 'medkit') return 'MEDKIT';
+  return l.kind.toUpperCase();
+}
+
+const LABEL_RANGE = 26, LABEL_MAX = 10;
+
+function drawLootLabels() {
+  const p = G.player;
+  if (!p.alive || p.buildMode) return;
+  const near = [];
+  for (const l of World.loot) {
+    const d = dist2(p.pos[0], p.pos[2], l.x, l.z);
+    if (d > LABEL_RANGE * LABEL_RANGE || Math.abs(l.y - p.pos[1]) > 8) continue;
+    near.push({ l, d });
+  }
+  if (!near.length) return;
+  near.sort((a, b) => a.d - b.d);
+  near.length = Math.min(near.length, LABEL_MAX);
+
+  hud.save();
+  hud.setTransform(1, 0, 0, 1, 0, 0);
+  const W = hudCv.width, H = hudCv.height, S = clamp(W / 1400, 0.5, 1.15);
+  hud.textAlign = 'center';
+  const grab = Input.padActive ? '[X]' : '[E]';
+  const aimed = lookedAtLoot(p, PICKUP_RANGE);      // the one E / X would actually take
+  const h = 20 * S, placed = [];
+  for (let i = near.length - 1; i >= 0; i--) {          // nearest drawn last, on top
+    const l = near[i].l;
+    if (!projectPoint(R.vp, l.x, l.y + 1.15, l.z, W, H, _scr)) continue;
+    const name = lootName(l);
+    const c = lootColor(l);
+    hud.font = '700 ' + (13 * S).toFixed(1) + 'px system-ui, sans-serif';
+    const w = hud.measureText(name).width + 14 * S;
+    // a pile of loot would stack every tag on the same pixel — lift until it's clear
+    let x = _scr[0] - w / 2, y = _scr[1] - h / 2;
+    for (let g = 0; g < 8; g++) {
+      const clash = placed.some(r => x < r.x + r.w && x + w > r.x && y < r.y + r.h && y + h > r.y);
+      if (!clash) break;
+      y -= h + 2 * S;
+    }
+    placed.push({ x, y, w, h });
+    const isAimed = l === aimed;
+    const fade = clamp(1 - Math.sqrt(near[i].d) / LABEL_RANGE, 0, 1);
+    hud.globalAlpha = isAimed ? 1 : 0.4 + 0.6 * fade;
+    hud.fillStyle = isAimed ? 'rgba(0,0,0,.85)' : 'rgba(0,0,0,.66)';
+    hud.fillRect(x, y, w, h);
+    hud.fillStyle = `rgb(${c[0] * 255 | 0},${c[1] * 255 | 0},${c[2] * 255 | 0})`;
+    hud.fillRect(x, y + h - 2.5 * S, w, 2.5 * S);
+    if (isAimed) { hud.strokeStyle = '#fff'; hud.lineWidth = 1.5 * S; hud.strokeRect(x, y, w, h); }
+    hud.fillStyle = '#fff';
+    hud.fillText(name, x + w / 2, y + h / 2);
+    // prompt on the one you are pointing at — that is what E / X takes
+    if (isAimed) {
+      hud.font = '700 ' + (11 * S).toFixed(1) + 'px system-ui, sans-serif';
+      hud.fillStyle = '#ffd24a';
+      const full = l.kind !== 'ammo' && l.kind !== 'mats' && !p.inv.some((x2, i2) => i2 > 0 && !x2);
+      hud.fillText(grab + ' ' + (full ? 'SWAP' : 'PICK UP'), x + w / 2, y - 9 * S);
+    }
+  }
+  hud.globalAlpha = 1;
+  hud.restore();
+}
+
+function drawDamageNumbers() {
+  // world-space projection needs real pixels, so drop the HUD scale transform
+  hud.save();
+  hud.setTransform(1, 0, 0, 1, 0, 0);
+  const W = hudCv.width, H = hudCv.height;
+  hud.textAlign = 'center';
+  for (const d of G.dmgNums) {
+    if (!projectPoint(R.vp, d.x + d.ox, d.y + d.t * 1.6, d.z, W, H, _scr)) continue;
+    const a = clamp(1 - d.t / d.life, 0, 1);
+    hud.globalAlpha = a;
+    hud.font = (d.crit ? '800 26px ' : '700 20px ') + 'system-ui, sans-serif';
+    hud.fillStyle = d.crit ? '#ffd24a' : '#fff';
+    hud.strokeStyle = 'rgba(0,0,0,.7)'; hud.lineWidth = 3;
+    hud.strokeText(d.val, _scr[0], _scr[1]);
+    hud.fillText(d.val, _scr[0], _scr[1]);
+  }
+  hud.globalAlpha = 1;
+  hud.restore();
+}
+
+/* ------------------------------- main loop --------------------------------- */
+
+function update(dt) {
+  G.t += dt;
+  const p = G.player;
+
+  if (G.state === 'drop' || G.state === 'play') {
+    if (p.alive) updatePlayer(p, dt);
+    if (p.fireT > 0) p.fireT -= dt;
+    if (p.swingT > 0) p.swingT -= dt;
+    if (p.buildT > 0) p.buildT -= dt;
+    if (p.muzzleT > 0) p.muzzleT -= dt;
+    if (p.reloadT > 0) { p.reloadT -= dt; if (p.reloadT <= 0) finishReload(p); }
+  }
+
+  const simulate = G.state !== 'menu';
+  if (simulate) {
+    for (const e of G.ents) {
+      if (e === p) continue;
+      if (e.alive) updateBot(e, dt);
+      if (e.muzzleT > 0) e.muzzleT -= dt;
+      if (e.hurtT > 0) e.hurtT -= dt;
+    }
+    updateLoot(dt);
+    updateSupport();
+    updateCollapsing(dt);
+    updateParticles(dt);
+    for (const ch of World.chests) if (ch.opened && ch.openT < 1) ch.openT = Math.min(1, (ch.openT || 0) + dt * 3);
+    if (G.state !== 'drop') updateStorm(dt);
+    else { G.storm.timer -= dt * 0.4; if (G.storm.timer < 1) G.storm.timer = 1; }
+    if (G.bus) { G.bus.t += dt; G.bus.x += G.bus.dx * 30 * dt; G.bus.z += G.bus.dz * 30 * dt; }
+    for (const e of G.ents) { if (!e.alive) e.deadT += dt; updateAnim(e, dt); }
+  }
+  if (G.state === 'drop' && G.ents.every(e => !e.alive || e.landed || e === p)) {
+    if (p.pos[1] <= terrainHeight(p.pos[0], p.pos[2]) + 0.06) G.state = 'play';
+  }
+
+  // timers / fx
+  if (p.hurtT > 0) p.hurtT -= dt;
+  G.hitMark -= dt; G.critMark -= dt; G.elimFlash -= dt * 1.2; G.hurtFlash -= dt * 2;
+  G.msgT -= dt;
+  for (let i = G.tracers.length - 1; i >= 0; i--) { G.tracers[i].t -= dt; if (G.tracers[i].t <= 0) G.tracers.splice(i, 1); }
+  for (let i = G.dmgNums.length - 1; i >= 0; i--) { G.dmgNums[i].t += dt; if (G.dmgNums[i].t >= G.dmgNums[i].life) G.dmgNums.splice(i, 1); }
+  for (let i = G.feed.length - 1; i >= 0; i--) { G.feed[i].t -= dt; if (G.feed[i].t <= 0) G.feed.splice(i, 1); }
+  for (let i = World.flashing.length - 1; i >= 0; i--) {
+    const f = World.flashing[i];
+    f.hitT -= dt;
+    if (f.hitT <= 0) { f.hitT = 0; World.flashing[i] = World.flashing[World.flashing.length - 1]; World.flashing.pop(); }
+  }
+}
+
+let lastT = 0;
+function frame(now) {
+  if (!window.__AUTO) requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (now - lastT) / 1000 || 0.016);
+  lastT = now;
+  Input.pollPad();
+  // Start / A works the menu and the end screen, so a pad never needs the mouse.
+  if (G.state === 'menu' || G.state === 'dead' || G.state === 'win') {
+    if (Input.padHit(PAD.START) || Input.padHit(PAD.A)) { startGame(); Input.endFrame(); return; }
+  }
+  const hw = Math.floor(window.innerWidth), hh = Math.floor(window.innerHeight);
+  if (hudCv.width !== hw || hudCv.height !== hh) { hudCv.width = hw; hudCv.height = hh; }
+  if (G.state === 'menu') {
+    // the world turns slowly behind the menu; characters idle in place
+    G.menuT += dt;
+    for (const e of G.ents) { if (!e.anim) updateAnim(e, dt); else e.anim.update(dt); }
+    renderScene();
+    drawHUD();
+    Input.endFrame();
+    return;
+  }
+  const canRun = Input.locked || Input.padActive || G.state === 'dead' || G.state === 'win' || window.__NOLOCK;
+  if (canRun) update(dt);
+  // Only resize when it actually changed — assigning width/height reallocates the
+  // whole backing store, and doing that 60 times a second is a real frame cost.
+  // (drawHUD clears the whole canvas itself, so skipping the resize is safe)
+  renderScene();
+  drawHUD();
+  updateOverlays();
+  Input.endFrame();
+}
+
+/* --------------------------------- shell ----------------------------------- */
+
+// The end screen only ever changes when the match does, so look the nodes up once
+// and write to them on a transition instead of touching the DOM 60 times a second.
+let _ovState = null, _ovDead = null, _ovTitle = null, _ovSub = null;
+
+function updateOverlays() {
+  const key = (G.state === 'dead' || G.state === 'win')
+    ? G.state + '|' + G.placement + '|' + G.player.kills : 'hidden';
+  if (key === _ovState) return;
+  _ovState = key;
+  if (!_ovDead) {
+    _ovDead = document.getElementById('endScreen');
+    _ovTitle = document.getElementById('endTitle');
+    _ovSub = document.getElementById('endSub');
+  }
+  if (key === 'hidden') { _ovDead.style.display = 'none'; return; }
+  _ovDead.style.display = 'flex';
+  _ovTitle.textContent = G.state === 'win' ? '#1 VICTORY ROYALE' : 'ELIMINATED';
+  _ovTitle.style.color = G.state === 'win' ? '#ffd24a' : '#ff6b6b';
+  _ovSub.textContent =
+    (G.state === 'win' ? 'You outlasted everyone' : '#' + G.placement + ' of ' + PLAYER_COUNT) +
+    '  ·  ' + G.player.kills + ' elimination' + (G.player.kills === 1 ? '' : 's');
+}
+
+function startGame() {
+  Sfx.init();
+  newMatch();
+  document.getElementById('menu').style.display = 'none';
+  document.getElementById('endScreen').style.display = 'none';
+  // A pad drives the camera directly — grabbing the mouse would only get in the way.
+  if (!Input.padActive && !window.__NOLOCK) R.canvas.requestPointerLock();
+}
+
+// Every model the game can use. Props fall back to boxes, characters to the
+// old blocky figure, until their file lands — see assets/README.md.
+const MANIFEST = (() => {
+  const m = {};
+  for (const k in PROP_DEF) for (const name of PROP_DEF[k].models) m[name] = 'assets/' + name + '.glb';
+  for (const name of ['chest', 'bottle_a']) m[name] = 'assets/' + name + '.glb';
+  for (const c of CHAR_SKINS) m[c] = { url: 'assets/' + c + '.glb', skipNodes: '^handslot\\.' };
+  return m;
+})();
+
+function boot() {
+  const canvas = document.getElementById('gl');
+  hudCv = document.getElementById('hud');
+  hud = hudCv.getContext('2d');
+  // size the backing store before the context exists — a context created on the
+  // default 300x150 canvas and grown afterwards is not composited by every build
+  const dpr0 = Math.min(window.devicePixelRatio || 1, 1.5);
+  canvas.width = Math.floor(window.innerWidth * dpr0); canvas.height = Math.floor(window.innerHeight * dpr0);
+  try { R = new Renderer(canvas); }
+  catch (err) {
+    document.getElementById('menu').innerHTML = '<div style="padding:40px;color:#fff">' + err.message + '</div>';
+    return;
+  }
+  Input.attach(canvas);
+  World.ents = G.ents;
+
+  // procedural materials + the textured meshes the build pieces are drawn with
+  TEX = Textures.build(R);
+  const mats = [TEX.wood, TEX.brick, TEX.metal];
+  PIECE_MESH = mats.map((t, i) => ({
+    cube: R.addTextured(MESH_CUBE, t, 0.5, i === MAT_METAL ? 0.55 : 0.06),
+    ramp: R.addTextured(MESH_RAMP, t, 0.5, i === MAT_METAL ? 0.55 : 0.06),
+    cone: R.addTextured(MESH_CONE, t, 0.5, i === MAT_METAL ? 0.55 : 0.06),
+  }));
+  ITEM_MESH = {
+    ammo: R.addTextured(MESH_CUBE, TEX.ammo, 1.6, 0.1),
+    medkit: R.addTextured(MESH_CUBE, TEX.medkit, 1.5, 0.2),
+    bus: R.addTextured(MESH_CUBE, TEX.bus, 0.25, 0.3),
+  };
+
+  // Models load in the background; the menu, the map and the match never wait on
+  // them, and one that arrives mid-round just starts being drawn.
+  // NOTE: file:// cannot fetch these (CORS), so models only appear over
+  // http:// — run `node server.js`.
+  Assets.init(R);
+  Assets.loadAll(MANIFEST);
+
+  addEventListener('resize', () => R.resize());
+  document.getElementById('playBtn').addEventListener('click', startGame);
+  document.getElementById('againBtn').addEventListener('click', startGame);
+
+  // control-list tabs; a pad plugging itself in flips to its own list
+  const tabKb = document.getElementById('tabKb'), tabPad = document.getElementById('tabPad');
+  const showPad = on => {
+    document.getElementById('keysKb').style.display = on ? 'none' : 'grid';
+    document.getElementById('keysPad').style.display = on ? 'grid' : 'none';
+    tabKb.setAttribute('aria-selected', String(!on));
+    tabPad.setAttribute('aria-selected', String(on));
+  };
+  tabKb.addEventListener('click', () => showPad(false));
+  tabPad.addEventListener('click', () => showPad(true));
+  addEventListener('gamepadconnected', () => showPad(true));
+  if (Array.from(navigator.getGamepads ? navigator.getGamepads() : []).some(p => p && p.connected)) showPad(true);
+  addEventListener('keydown', e => {
+    if (e.code === 'Enter' && (G.state === 'dead' || G.state === 'win' || G.state === 'menu')) startGame();
+  });
+
+  // a world to look at behind the menu
+  newMatch();
+  for (const e of G.ents) { e.pos[1] = terrainHeight(e.pos[0], e.pos[2]); e.landed = true; e.grounded = true; }
+  G.state = 'menu';
+
+  // headless/debug helpers
+  window.FN = {
+    G, World,
+    start: () => { window.__NOLOCK = true; startGame(); document.exitPointerLock && document.exitPointerLock(); },
+    god: () => { G.player.hp = 1e9; G.player.shield = 1e9; },
+    give: (id, rar) => { G.player.inv[1] = { id, rar: rar || 4, mag: WEAPONS[id].mag }; G.player.slot = 1; },
+    mats: n => { G.player.mats = [n, n, n]; },
+    tp: (x, z) => { G.player.pos[0] = x; G.player.pos[2] = z; G.player.pos[1] = 30; },
+    // gamepad tuning / testing
+    Input,
+    sens: n => { Input.padLook = n; },
+    fov: n => { FOV.base = n; },
+    terrain: (x, z) => terrainHeight(x, z),
+    // what loaded, what failed and why, and how heavy each model is
+    assets: () => Assets.report(),
+    reload: (name, url) => Assets.load(name, url || 'assets/' + name + '.glb', MANIFEST[name]),
+    aimAssist: on => { G.aimAssist = on !== false; },
+    shadows: on => { R.shadowsOn = on !== false; },
+    // what pad was detected and which slots are live — for diagnosing an odd controller
+    pad: () => Input.pad && ({
+      id: Input.pad.id, mapping: Input.pad.mapping, profile: Input._prof,
+      axes: Array.prototype.slice.call(Input.pad.axes).map(v => +v.toFixed(2)),
+      down: Object.keys(PAD).filter(k => Input.padDown(PAD[k])),
+    }),
+  };
+
+  // ?auto=…: headless screenshot mode. Waits for the models, starts a match, puts
+  // the player where the query says, steps the simulation without rendering, then
+  // renders once and sets the title to READY. dev/README.md has the parameters.
+  const q = new URLSearchParams(location.search);
+  if (q.has('auto')) { window.__AUTO = true; autoRun(q); }
+  else requestAnimationFrame(frame);
+}
+
+async function autoRun(q) {
+  const num = (k, d) => q.has(k) ? parseFloat(q.get(k)) : d;
+  const t0 = performance.now();
+  while (Assets.pending > 0 && performance.now() - t0 < 20000) await new Promise(r => setTimeout(r, 50));
+  window.__NOLOCK = true;
+  if (q.get('auto') === 'menu') { G.menuT = num('t', 20); }
+  else if (q.get('auto') === 'drop') {   // mid-air during the drop: bus, glider, the map below
+    startGame();
+    Input.keys.KeyW = true;
+    for (let i = 0; i < num('steps', 90); i++) update(1 / 30);
+    updateCamera(G.player, 1);
+  }
+  else {
+    startGame();
+    const p = G.player;
+    const poi = World.pois[num('poi', 0)] || World.pois[0];
+    const x = q.has('x') ? num('x', 0) : poi.x + num('ox', 0), z = q.has('z') ? num('z', 0) : poi.z + num('oz', 0);
+    p.pos[0] = x; p.pos[2] = z; p.pos[1] = surfaceUnder(x, 200, z, 200) + 0.01;
+    p.yaw = num('yaw', 0); p.pitch = num('pitch', -0.1);
+    if (q.get('give')) { FN.give(q.get('give'), num('rar', 3)); }
+    if (q.has('mats')) FN.mats(num('mats', 500));
+    if (q.get('fp')) G.firstPerson = true;
+    if (q.get('build')) { p.buildMode = true; p.buildType = num('build', 1) | 0; }
+    G.state = 'play';
+    for (const e of G.ents) { if (e === p) continue; e.landed = true; e.pos[1] = terrainHeight(e.pos[0], e.pos[2]); }
+    // bring a few bots close so they are in the shot
+    if (q.has('bots')) {
+      const n = num('bots', 3);
+      for (let i = 1; i <= n && i < G.ents.length; i++) {
+        const b = G.ents[i];
+        const fx = -Math.sin(p.yaw), fz = -Math.cos(p.yaw), rx = Math.cos(p.yaw), rz = -Math.sin(p.yaw), dd = num('bdist', 7) + i * 2.5, ss = (i - 2) * 3;
+        b.pos[0] = x + fx * dd + rx * ss; b.pos[2] = z + fz * dd + rz * ss; b.pos[1] = surfaceUnder(b.pos[0], 200, b.pos[2], 200);
+        b.wander[0] = b.pos[0]; b.wander[1] = b.pos[2]; b.think = 999;
+        b.inv[1] = { id: GUN_IDS[i % GUN_IDS.length], rar: i % 5, mag: 10 }; b.slot = 1;
+        b.yaw = Math.atan2(-(x - b.pos[0]), -(z - b.pos[2]));
+      }
+    }
+    const steps = num('steps', 30);
+    for (let i = 0; i < steps; i++) { Input.keys.KeyW = q.get('walk') === '1'; update(1 / 30); }
+    if (q.get('ads')) p.ads = true;
+    if (q.get('place')) { p.buildMode = true; for (let i = 0; i < num('place', 1); i++) { p.buildT = 0; tryBuild(p); update(0.05); } }
+    updateCamera(p, 1);
+    p.camDist = undefined; updateCamera(p, 1);
+    if (q.get('fire')) { const aim = playerAimDir(p); p.fireT = 0; tryFire(p, aim[0], aim[1], aim[2]); update(0.016); }
+    if (q.has('side')) {    // look at the player from the right, for weapon checks
+      const d = num('side', 3), rx = Math.cos(p.yaw), rz = -Math.sin(p.yaw);
+      G.debugCam = { x: p.pos[0] + rx * d, y: p.pos[1] + 1.3, z: p.pos[2] + rz * d, yaw: wrapAngle(p.yaw + Math.PI / 2), pitch: -0.05 };
+    }
+    if (q.has('front')) {   // look back at the player from in front, for character checks
+      const d = num('front', 3), fx = -Math.sin(p.yaw), fz = -Math.cos(p.yaw);
+      G.debugCam = { x: p.pos[0] + fx * d, y: p.pos[1] + 1.4, z: p.pos[2] + fz * d, yaw: wrapAngle(p.yaw + Math.PI), pitch: -0.08 };
+    }
+  }
+  hudCv.width = window.innerWidth; hudCv.height = window.innerHeight;
+  // present through real animation frames so the compositor picks the frame up
+  await new Promise(r => requestAnimationFrame(r));
+  renderScene(); drawHUD();
+  await new Promise(r => requestAnimationFrame(r));
+  renderScene(); drawHUD();
+  const _gl = R.gl, _w = R.canvas.width, _h = R.canvas.height, _px = new Uint8Array(_w * _h * 4);
+  _gl.readPixels(0, 0, _w, _h, _gl.RGBA, _gl.UNSIGNED_BYTE, _px);
+  let _dark = 0; for (let i = 0; i < _px.length; i += 4) if (_px[i] + _px[i + 1] + _px[i + 2] < 30) _dark++;
+  window.__READY = { calls: R.drawCalls, instances: R.instances, errors: Assets.errors.slice(), loaded: Object.keys(Assets.models).length, glError: _gl.getError(), dark: +(100 * _dark / (_w * _h)).toFixed(1), size: _w + "x" + _h, state: G.state, pos: G.player.pos.map(v => +v.toFixed(1)), anim: G.player.anim && G.player.anim.curName, upper: G.player.upper, slot: G.player.slot, item: curItem(G.player) && curItem(G.player).id };
+  document.title = 'READY';
+  hud.setTransform(1, 0, 0, 1, 0, 0); hud.font = '12px monospace'; hud.fillStyle = '#5f5'; hud.textAlign = 'left'; hud.textBaseline = 'top';
+  hud.fillText('READY ' + JSON.stringify(window.__READY), 8, 4);
+}
+
+addEventListener('DOMContentLoaded', boot);
