@@ -75,11 +75,20 @@ const World = {
   // in a match — to find the two that were actually hit. They enrol themselves
   // when damaged and drop out when the flash ends.
   flashing: [],
+  // Multiplayer. `authority` is false on a client whose lobby host owns the world:
+  // pieces then only vanish and structures only collapse when the host says so.
+  // Props and loot carry ids (assigned in generation order, which is seeded, so
+  // every client numbers them identically); the hooks let net.js broadcast
+  // whatever the host's simulation does to the world.
+  authority: true,
+  nextLootId: 1, nextPropId: 1, propById: new Map(),
+  onPieceGone: null, onCollapse: null, onPropGone: null, onLootToss: null,
   reset() {
     this.pieces.clear(); this.keyMap.clear(); this.props.length = 0; this.loot.length = 0;
     this.chests.length = 0; this.hash.clear(); this.colliders.length = 0;
     this.pads.length = 0; this.pois.length = 0; this.roads.length = 0; this.flashing.length = 0;
     this.collapsing.length = 0; this.supportDirty = false;
+    this.nextLootId = 1; this.nextPropId = 1; this.propById.clear();
     _tbase.clear(); _tground.clear();
   }
 };
@@ -431,14 +440,17 @@ function removePiece(p, silent) {
     const s = World.keyMap.get(k);
     if (s) { s.delete(p); if (!s.size) World.keyMap.delete(k); }
   }
-  if (!silent) World.supportDirty = true;
+  if (!silent) {
+    World.supportDirty = true;
+    if (World.onPieceGone) World.onPieceGone(p);
+  }
 }
 
 // Walk the support graph from every grounded piece; whatever is left over has
 // nothing holding it up and falls. Runs once per frame at most, only after a
 // removal, and is a plain BFS over the pieces.
 function updateSupport() {
-  if (!World.supportDirty) return;
+  if (!World.supportDirty || !World.authority) return;
   World.supportDirty = false;
   const ok = new Set();
   const open = [];
@@ -453,11 +465,19 @@ function updateSupport() {
       for (const q of s) if (!ok.has(q)) { ok.add(q); open.push(q); }
     }
   }
+  const fallen = [];
   for (const p of Array.from(World.pieces.values())) {
     if (ok.has(p)) continue;
-    removePiece(p, true);
-    World.collapsing.push({ type: p.type, gx: p.gx, gy: p.gy, gz: p.gz, rot: p.rot, mat: p.mat, t: 0, y: pieceY(p), vy: rnd(0.5, 2), spin: rnd(-1.5, 1.5) });
+    collapsePiece(p);
+    fallen.push(p.key);
   }
+  if (fallen.length && World.onCollapse) World.onCollapse(fallen);
+}
+
+// Take a piece out of the world and start it falling.
+function collapsePiece(p) {
+  removePiece(p, true);
+  World.collapsing.push({ type: p.type, gx: p.gx, gy: p.gy, gz: p.gz, rot: p.rot, mat: p.mat, t: 0, y: pieceY(p), vy: rnd(0.5, 2), spin: rnd(-1.5, 1.5) });
   if (World.collapsing.length > 400) World.collapsing.splice(0, World.collapsing.length - 400);
 }
 
@@ -557,7 +577,8 @@ function addProp(kind, x, z, opts) {
   const h = (Array.isArray(def.h) ? def.h[vi] : def.h) * (o.scale || 1);
   const rot = o.rot !== undefined ? o.rot : (def.rot === 'any' ? rnd(0, Math.PI * 2) : 0);
   const y = o.y !== undefined ? o.y : terrainHeight(x, z);
-  const p = { kind, model, x, y, z, rot, h, mat: def.mat, hp: def.hp, maxHp: def.hp, t: Math.random() * 6, solid: def.solid !== false, col: null, cull: def.cull || Math.max(2, h * 0.5) };
+  const p = { kind, model, x, y, z, rot, h, mat: def.mat, hp: def.hp, maxHp: def.hp, t: Math.random() * 6, solid: def.solid !== false, col: null, cull: def.cull || Math.max(2, h * 0.5), id: World.nextPropId++ };
+  World.propById.set(p.id, p);
   if (p.solid) {
     const [rx, rz] = propFootprint(def, model, h, rot);
     p.col = addCollider({ minx: x - rx, maxx: x + rx, miny: y - 1, maxy: y + h, minz: z - rz, maxz: z + rz, kind: 'prop', ref: p });
@@ -571,12 +592,17 @@ function damageProp(p, dmg) {
   if (!(p.hitT > 0)) World.flashing.push(p);   // undefined on a fresh piece/prop
   p.hitT = 0.15;
   if (p.hp <= 0) {
-    if (p.col) p.col.dead = true;
-    const i = World.props.indexOf(p);
-    if (i >= 0) World.props.splice(i, 1);
+    destroyProp(p);
+    if (World.onPropGone) World.onPropGone(p);
     return 34;
   }
   return 15;
+}
+function destroyProp(p) {
+  if (p.col) p.col.dead = true;
+  const i = World.props.indexOf(p);
+  if (i >= 0) World.props.splice(i, 1);
+  World.propById.delete(p.id);
 }
 
 /* ---------------------------------- loot ----------------------------------- */
@@ -587,7 +613,7 @@ function damageProp(p, dmg) {
 function spawnLoot(kind, x, y, z, data) {
   const it = {
     kind, x, y, z, spin: Math.random() * 6, data: data || {},
-    vx: 0, vy: 0, vz: 0, rest: false, cool: 0, pop: 0
+    vx: 0, vy: 0, vz: 0, rest: false, cool: 0, pop: 0, id: World.nextLootId++
   };
   World.loot.push(it);
   return it;
@@ -599,8 +625,10 @@ function spawnAmmoLoot(x, y, z, type, n) { return spawnLoot('ammo', x, y, z, { t
 function tossLoot(it, vx, vy, vz, cool) {
   it.vx = vx; it.vy = vy; it.vz = vz;
   it.rest = false; it.cool = cool || 0; it.pop = 1;
+  if (World.onLootToss) World.onLootToss(it);
   return it;
 }
+function lootById(id) { for (const l of World.loot) if (l.id === id) return l; return null; }
 
 // Top surface directly beneath a point, so loot and skydivers land on builds,
 // roofs, ramps and props as well as the ground.

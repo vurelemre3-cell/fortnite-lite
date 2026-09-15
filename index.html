@@ -37,6 +37,27 @@
     border-radius:4px; background:rgba(255,255,255,.10); color:#cfe6ff; box-shadow:none; }
   .tabs button[aria-selected="true"] { background:linear-gradient(180deg,#8ee2ff,#2ea7e6); color:#04121f; }
   .keys.pad b { color:var(--blue); }
+  /* lobby */
+  #lobby { display:flex; flex-direction:column; align-items:center; gap:10px; width:min(560px,92vw);
+    background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.12); border-radius:10px; padding:16px 20px; }
+  #lobby h3 { margin:0; font-size:13px; letter-spacing:.18em; opacity:.8; text-transform:uppercase; }
+  #lobby .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; justify-content:center; }
+  #lobby input, #lobby select { font:700 15px system-ui, sans-serif; padding:9px 12px; border-radius:6px;
+    border:1px solid rgba(255,255,255,.2); background:rgba(0,0,0,.35); color:#fff; outline:none; }
+  #lobby input:focus, #lobby select:focus { border-color:var(--blue); }
+  #lobby select option { color:#000; }
+  #codeIn { width:96px; text-transform:uppercase; letter-spacing:.2em; text-align:center; }
+  #lobby button.small { font-size:13px; padding:10px 20px; box-shadow:0 4px 0 #14618c; }
+  #lobby button.small:active { transform:translateY(3px); box-shadow:0 1px 0 #14618c; }
+  #lobby button.ghost { background:rgba(255,255,255,.12); color:#cfe6ff; box-shadow:none; }
+  #lobby .err { color:#ff8a8a; font-size:13px; min-height:16px; }
+  #lobby .code { font-size:15px; letter-spacing:.12em; }
+  #lobby .code b { font-size:30px; color:var(--gold); letter-spacing:.3em; margin-left:6px; }
+  #lobby a { color:var(--blue); font-size:12px; word-break:break-all; }
+  #playerList { display:flex; flex-direction:column; gap:3px; font-size:14px; min-width:220px; }
+  #playerList div { padding:4px 10px; background:rgba(0,0,0,.25); border-radius:4px; text-align:left; }
+  #botsRow { font-size:13px; opacity:.85; display:flex; gap:8px; align-items:center; }
+  #waitMsg { font-size:13px; opacity:.7; }
 </style>
 </head>
 <body>
@@ -45,8 +66,35 @@
 
 <div class="screen" id="menu">
   <h1>FORTNITE LITE</h1>
-  <p class="sub">24 players · build · storm · last one standing</p>
+  <p class="sub">24 players · build · storm · last one standing · solo or with friends</p>
   <button id="playBtn">DROP IN</button>
+  <div id="lobby">
+    <h3>Play with friends</h3>
+    <div id="lobbyJoin">
+      <div class="row">
+        <input id="nameIn" maxlength="14" placeholder="Your name" autocomplete="off">
+        <select id="skinSel" title="Character"></select>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button id="createBtn" class="small">CREATE LOBBY</button>
+        <span style="opacity:.6;font-size:12px">or</span>
+        <input id="codeIn" maxlength="4" placeholder="CODE" autocomplete="off">
+        <button id="joinBtn" class="small">JOIN</button>
+      </div>
+      <div class="err" id="lobbyErr"></div>
+    </div>
+    <div id="lobbyRoom" style="display:none">
+      <div class="code">LOBBY <b id="roomCode"></b></div>
+      <a id="roomLink" target="_blank" rel="noopener"></a>
+      <div id="playerList" style="margin:10px auto"></div>
+      <label id="botsRow"><input type="checkbox" id="botsChk" checked> Fill the lobby with bots (24 total)</label>
+      <div class="row" style="margin-top:10px">
+        <button id="startBtn" class="small">START MATCH</button>
+        <span id="waitMsg">Waiting for the host to start…</span>
+        <button id="leaveBtn" class="small ghost">LEAVE</button>
+      </div>
+    </div>
+  </div>
   <div class="tabs" id="ctrlTabs">
     <button id="tabKb" aria-selected="true">KEYBOARD</button>
     <button id="tabPad" aria-selected="false">CONTROLLER · BUILDER PRO</button>
@@ -95,8 +143,12 @@
 <div class="screen" id="endScreen" style="display:none">
   <h2 id="endTitle">ELIMINATED</h2>
   <p class="sub" id="endSub"></p>
-  <button id="againBtn">PLAY AGAIN</button>
-  <p class="note">Enter restarts — or Start / A on a controller.</p>
+  <div style="display:flex;gap:12px;flex-wrap:wrap;justify-content:center">
+    <button id="againBtn">PLAY AGAIN</button>
+    <button id="specBtn" style="display:none">SPECTATE</button>
+    <button id="lobbyBtn" style="display:none">BACK TO LOBBY</button>
+  </div>
+  <p class="note" id="endNote">Enter restarts — or Start / A on a controller.</p>
 </div>
 
 <script src="engine.js"></script>
@@ -104,6 +156,13 @@
 <script src="anim.js"></script>
 <script src="textures.js"></script>
 <script src="world.js"></script>
+<script>
+  // Multiplayer server. Empty = the same host the page came from (node server.js,
+  // or the Railway deployment). Set it to the Railway URL when the page itself is
+  // served from somewhere static, e.g. GitHub Pages: 'https://your-app.up.railway.app'
+  window.NET_SERVER = '';
+</script>
 <script src="game.js"></script>
+<script src="net.js"></script>
 </body>
 </html>

@@ -15,7 +15,7 @@ global.requestAnimationFrame = () => 0;
 global.performance = global.performance || { now: () => Date.now() };
 global.location = { search: '', href: 'http://localhost/' };
 global.fetch = () => Promise.reject(new Error('no fetch'));
-for (const f of ['engine.js', 'models.js', 'anim.js', 'textures.js', 'world.js', 'game.js']) {
+for (const f of ['engine.js', 'models.js', 'anim.js', 'textures.js', 'world.js', 'game.js', 'net.js']) {
   vm.runInThisContext(fs.readFileSync(path.join(root, f), 'utf8'), { filename: f });
 }
 

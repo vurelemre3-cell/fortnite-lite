@@ -1,8 +1,10 @@
 # fortnite-lite — CONTEXT
 
 A stripped-down but playable Fortnite: battle bus drop, loot, grid building,
-shrinking storm, 24 players, last one standing. Zero dependencies, custom WebGL2
-renderer with shadows and skinned characters, CC0 KayKit models, ~5000 lines.
+shrinking storm, 24 players, last one standing — solo against bots or in a lobby
+with friends. Zero dependencies, custom WebGL2 renderer with shadows and skinned
+characters, CC0 KayKit models, ~6000 lines. Repo: github.com/arcedav/fortnite-lite;
+deploy notes in README.md (Railway).
 
 ## Run
 
@@ -27,7 +29,9 @@ runs a second copy (the dev harness uses one).
 | `textures.js` | Procedural textures painted on canvases at boot: wood / brick / metal, grass / rock / dirt, noise, item skins |
 | `world.js` | Absolute build grid + structural support, colliders + spatial hash, collision, raycasting, terrain + roads + splat map, themed POI generation, props, loot |
 | `game.js` | Match flow, player, bots, combat, placement, character animation state, HUD, screenshot mode |
-| `server.js` | Zero-dep static server with live reload |
+| `net.js` | Lobbies (create / join by code) and the multiplayer sync layer — see "Multiplayer" |
+| `server.js` | Zero-dep static server with live reload + the WebSocket lobby relay (RFC 6455 implemented inline) |
+| `package.json` | `npm start` → `node server.js`; no dependencies. Railway / Render deploy from it as-is |
 | `assets/` | 80 CC0 KayKit `.glb` files — see `assets/README.md` |
 | `dev/` | Headless test suite, GL smoke test, asset download / packing tools — see `dev/README.md` |
 
@@ -254,11 +258,63 @@ a small snap onto a nearby enemy the frame ADS starts, then gentle magnetism
 while held, released whenever the mouse moves away. Sprint (Shift / L3) is a
 toggle, not hold. `wrapAngle`/`angleDelta` keep yaw folded.
 
+## Multiplayer
+
+**Topology.** `server.js` is a relay only: 4-letter lobby codes, the player
+list, and `{t:'to', to:'host'|'all'|id, d}` forwarding (delivered as
+`{t:'from', id, d}`). The lobby **host's browser is the match**: it runs the
+bots, storm, loot authority, structural support / collapse and everyone's
+health exactly as solo play does, and broadcasts what it decides. Every human
+simulates their own movement, aim, shooting and building locally (instant
+controls) and broadcasts a pose (`'st'`: pos, vel, yaw, pitch, grounded, glide,
+slot, inventory, mats, build mode, ADS, last upper-body one-shot
+`[seq,name,dur]`, muzzle flag) at 20 Hz. The host sends a snapshot (`'snap'`:
+alive count, storm, every entity's hp/shield/kills/hurt, and a pose for each
+bot) at 12 Hz. Remote entities (`e.remote`) are placed by `Net.interp()`
+120 ms behind real time between the two poses bracketing that moment, coasting
+on velocity past the newest.
+
+**Determinism.** `newMatch(setup)` takes `{seed, humans, bots, myId,
+authority}`. `generateWorld()` runs under `withSeed(seed)` (Math.random swapped
+for mulberry32) and the roster / bus line / storm under a second seed, so every
+client builds the identical map, props, loot, chests and bot list. Props and
+loot carry ids assigned in generation order; pieces are keyed by `pieceKey`.
+
+**Authority routing in game.js.** `dealDamage` / `dealPieceDamage` /
+`dealPropDamage` apply directly when `World.authority`, otherwise show the hit
+locally and send `'hit'` / `'dp'` / `'dr'` to the host. `requestTake` →
+`'take'` (host removes the item and answers `'lgone'` with `by`; the taker then
+runs `takeLoot`), `netDropLoot` → `'drop'`, `interact` on a chest → `'chest'`
+(host rolls and flings, everyone gets `'lspawn'`s and `'chestOpen'`), heals →
+`'heal'`. `tryBuild` places locally at once and sends `'build'`; the host
+answers `'piece'` (same key → no-op). World hooks (`World.onPieceGone`,
+`onCollapse`, `onPropGone`, `onLootToss`) let the host broadcast `'pgone'`,
+`'collapse'`, `'prgone'`, `'lspawn'`. `updateSupport` and `updateStorm`'s phase
+/ damage logic run only with authority; a client's storm just lerps the
+snapshot's fields. `eliminate` spills loot only with authority and broadcasts
+`'elim'` (with placement); the host sends `'end'` when one is left.
+
+**Flow.** Menu lobby panel → host `startMatch()` sends `'start'` {seed,
+humans, bots}; everyone runs `startGame(setup)`. Dead players can spectate
+(`G.spec`, click cycles, humans first) or go back to the lobby. A host leaving
+ends the match (`hostLeft`); a client leaving mid-match is eliminated by the
+host (`'quit'` / players list). The host tab keeps stepping the simulation at
+20 Hz from `setInterval` while hidden, since rAF stops. `window.NET_SERVER` (or
+`?server=`) points a statically hosted page at the relay.
+
+**Tests.** `dev/nettest.js` (server + real WebSocket client: routing, lock,
+host migration, a fragmented 200 KB frame), `dev/mptest.js` (host and client
+VM contexts through an in-memory relay: identical worlds, poses, hit, build,
+pickup, chest, drop, elim, end), `dev/browsertest.js` (two headless Chrome
+pages through the live server via the DevTools protocol).
+
 ## Known simplifications
 
 - No edit mode; no piece rotation preview beyond ramp facing.
 - No water, no driveable vehicles, no swimming.
-- No networking — bots only.
+- Multiplayer trusts clients (hits and pickups are what the client says — fine
+  for friends, not for strangers). Bot AI state lives only on the host, so a
+  host leaving ends the match rather than migrating it.
 - Characters share one rig; the held weapon follows the hand position but is
   oriented by the aim, so during a reload clip it stays pointed forward.
 - The chest lid does not hinge (the KayKit chest is one mesh).
@@ -270,6 +326,12 @@ toggle, not hold. `wrapAngle`/`angleDelta` keep yaw folded.
 - **v1.0–v1.4 (2026-08-17 … 2026-09-09)** — initial build, physical loot,
   controller support, real map with heightfield, aim-assist fix and frame-cost
   pass. (History in git-less detail: the earlier CONTEXT.md.)
+
+- **v2.1 (2026-09-14)** — sprint toggle, mouse aim assist (`mouseAssist`),
+  and **multiplayer lobbies**: relay server with an inline WebSocket
+  implementation, host-authoritative match with locally simulated players,
+  seeded world generation, name tags, spectating, `?join=CODE` links,
+  Railway-ready `package.json`, GitHub repo + Pages.
 
 - **v2.0 (2026-09-10)** — models for everything, a real renderer, and the
   building fixes.

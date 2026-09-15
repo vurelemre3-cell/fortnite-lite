@@ -138,6 +138,23 @@ function wrapAngle(a) {
 }
 function rnd(a, b) { return a + Math.random() * (b - a); }
 function pick(arr) { return arr[(Math.random() * arr.length) | 0]; }
+// Seedable RNG (mulberry32). Math.random is swapped for it while a match world
+// is generated, so every client in a lobby builds the identical map from one seed.
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function withSeed(seed, fn) {
+  const saved = Math.random;
+  Math.random = mulberry32(seed);
+  try { return fn(); } finally { Math.random = saved; }
+}
 
 // Deterministic hash noise in [0,1) — for anything that has to look random but
 // stay put from frame to frame (grass tufts, prop jitter).

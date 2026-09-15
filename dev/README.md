@@ -5,6 +5,9 @@ Tools that are not part of the game.
 | File | What |
 | --- | --- |
 | `test.js` | Headless building / collision suite. `node dev/test.js` — loads the real engine, world and game code with a stubbed DOM and checks walls block at every frame rate, walls built through you push you out, falls land on floors, ramp decks are solid from below, cones are walkable, placement lands next to you, staircases chain, structures collapse when their base goes, and hillside placement works. |
+| `nettest.js` | Relay server test. Spawns `server.js` on a spare port and drives it with Node's built-in WebSocket client: lobby codes, joining, `host` / `all` / id routing, a fragmented 200 KB frame, the mid-match lock, host migration. |
+| `mptest.js` | Headless multiplayer match. Loads the whole game twice (host and client, separate VM contexts) through an in-memory relay: identical worlds from one seed, poses both ways, a client hit on the host's health, a client build, pickup, chest, drop, elimination, spectate, end. |
+| `browsertest.js` | Two real headless Chrome pages through the live server over the DevTools protocol — needs `node server.js` running and Chrome (`CHROME=` to point at it). |
 | `gltest.html` | Renderer smoke test in a real WebGL2 context: terrain, textured pieces, props, an animated character with hand-slot axis markers. Open `http://localhost:3500/dev/gltest.html?anim=Running_A&upper=2H_Ranged_Aiming`. |
 | `fetchpack.js` | Downloads the KayKit models the game uses from GitHub and packs each `.gltf` + `.bin` + texture into one `.glb` (`pack.js`). |
 | `strip.js` | Trims a character `.glb` to the animation clips the game plays and drops the pack's melee weapons. |

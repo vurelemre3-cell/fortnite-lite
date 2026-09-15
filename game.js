@@ -20,6 +20,9 @@ const STORM_PHASES = [
 ];
 
 const BUILD_TYPES = ['wall', 'floor', 'ramp', 'cone'];
+// One colour per human in a lobby, by join order (the fallback figure and the minimap use it)
+const HUMAN_COLORS = [[0.30, 0.62, 0.95], [0.95, 0.45, 0.30], [0.40, 0.85, 0.45], [0.95, 0.80, 0.30],
+  [0.80, 0.40, 0.90], [0.35, 0.85, 0.85], [0.95, 0.55, 0.75], [0.90, 0.90, 0.90]];
 const CHAR_SKINS = ['char_knight', 'char_barbarian', 'char_mage', 'char_rogue', 'char_rogue_hooded'];
 
 // Time-to-kill. The point of a Fortnite fight is that it lasts: you trade shots,
@@ -45,6 +48,7 @@ const G = {
   paused: false,
   aimAssist: true,          // see padLook() and mouseAssist()
   bus: null, mini: null, menuT: 0,
+  spec: null,               // entity the camera follows after dying in a lobby match
 };
 
 let R = null, hudCv = null, hud = null;
@@ -61,6 +65,7 @@ const _av = [0, 0, 0], _bv = [0, 0, 0], _cv = [0, 0, 0], _camv = [0, 0, 0];
 function makeEntity(isBot, name, color, skin) {
   return {
     isBot, name, color, skin,
+    id: 0, human: !isBot, remote: false,   // remote = driven by the network, not simulated here
     pos: [0, 0, 0], vel: [0, 0, 0],
     yaw: 0, pitch: 0,
     hp: 100, shield: 0, alive: true, deadT: 0,
@@ -85,10 +90,21 @@ function curWeapon(e) { const it = curItem(e); return it ? WEAPONS[it.id] : null
 
 /* -------------------------------- match ------------------------------------ */
 
-function newMatch() {
+// A match is described by a `setup`: the world seed, the humans in it and
+// whether bots fill the rest. Solo play is a setup with one human. Everything
+// random about the world and the roster runs under the seed, so every client in
+// a lobby builds the identical map, bot list and drop line from the same setup.
+function soloSetup() {
+  return { seed: (Math.random() * 4294967296) >>> 0, humans: [{ id: 1, name: 'You', skin: 'char_knight' }], bots: true, myId: 1, authority: true };
+}
+
+function newMatch(setup) {
+  if (!setup) setup = soloSetup();
+  World.authority = setup.authority !== false;
   World.ents = G.ents;
   G.ents.length = 0; G.tracers.length = 0; G.dmgNums.length = 0; G.feed.length = 0; G.parts.length = 0;
-  const pois = generateWorld();
+  G.spec = null;
+  const pois = withSeed(setup.seed, generateWorld);
   if (R) {   // R is null in headless harnesses
     R.setTerrain(buildTerrainMesh());
     const sp = buildSplat();
@@ -99,52 +115,66 @@ function newMatch() {
   }
   G.t = 0; G.placement = 0; G.msg = ''; G.msgT = 0;
 
-  const player = makeEntity(false, 'You', [0.30, 0.62, 0.95], 'char_knight');
-  player.mats = [50, 0, 0];
-  player.ammo = { light: 60, medium: 40, shells: 12 };
-  G.player = player;
-  G.ents.push(player);
+  withSeed((setup.seed ^ 0x9E3779B9) >>> 0, () => {
+    const humans = setup.humans.slice().sort((a, b) => a.id - b.id);
+    humans.forEach((h, i) => {
+      const e = makeEntity(false, h.name, HUMAN_COLORS[i % HUMAN_COLORS.length], h.skin || 'char_knight');
+      e.id = h.id;
+      e.remote = h.id !== setup.myId;
+      e.mats = [50, 0, 0];
+      e.ammo = { light: 60, medium: 40, shells: 12 };
+      G.ents.push(e);
+    });
+    G.player = G.ents.find(e => e.id === setup.myId) || G.ents[0];
 
-  const names = BOT_NAMES.slice();
-  for (let i = 1; i < PLAYER_COUNT; i++) {
-    const n = names.length ? names.splice((Math.random() * names.length) | 0, 1)[0] : 'Bot' + i;
-    const b = makeEntity(true, n, [rnd(0.35, 0.95), rnd(0.3, 0.9), rnd(0.35, 0.95)], pick(CHAR_SKINS));
-    b.skill = rnd(0.25, 0.85);
-    b.shield = Math.round(rnd(0, BOT_SHIELD));
-    b.mats = [rnd(60, 180) | 0, rnd(0, 80) | 0, 0];
-    // spread landings out — a whole lobby landing on one roof is a bloodbath
-    b.landing = Math.random() < 0.75 ? pick(pois) : { x: rnd(-HALF + 20, HALF - 20), z: rnd(-HALF + 20, HALF - 20) };
-    b.landing = { x: b.landing.x + rnd(-55, 55), z: b.landing.z + rnd(-55, 55) };
-    G.ents.push(b);
-  }
+    const names = BOT_NAMES.slice();
+    if (setup.bots) for (let i = humans.length; i < PLAYER_COUNT; i++) {
+      const n = names.length ? names.splice((Math.random() * names.length) | 0, 1)[0] : 'Bot' + i;
+      const b = makeEntity(true, n, [rnd(0.35, 0.95), rnd(0.3, 0.9), rnd(0.35, 0.95)], pick(CHAR_SKINS));
+      b.id = 100 + i;
+      b.remote = !World.authority;
+      b.skill = rnd(0.25, 0.85);
+      b.shield = Math.round(rnd(0, BOT_SHIELD));
+      b.mats = [rnd(60, 180) | 0, rnd(0, 80) | 0, 0];
+      // spread landings out — a whole lobby landing on one roof is a bloodbath
+      b.landing = Math.random() < 0.75 ? pick(pois) : { x: rnd(-HALF + 20, HALF - 20), z: rnd(-HALF + 20, HALF - 20) };
+      b.landing = { x: b.landing.x + rnd(-55, 55), z: b.landing.z + rnd(-55, 55) };
+      G.ents.push(b);
+    }
 
-  // battle-bus line across the map: everyone has just jumped, spread along the
-  // bus's path; the bus itself is ahead of the last jumper and flies on
-  const busA = rnd(0, Math.PI * 2);
-  const bx = Math.cos(busA), bz = Math.sin(busA);
-  const sx = -bx * HALF * 0.85, sz = -bz * HALF * 0.85;
-  for (let i = 0; i < G.ents.length; i++) {
-    const e = G.ents[i];
-    const s = e === player ? HALF * 0.9 : rnd(HALF * 0.2, HALF * 1.5);
-    e.pos[0] = clamp(sx + bx * s + rnd(-6, 6), -HALF + 20, HALF - 20);
-    e.pos[2] = clamp(sz + bz * s + rnd(-6, 6), -HALF + 20, HALF - 20);
-    e.pos[1] = rnd(150, 172);
-    e.vel[0] = bx * 22; e.vel[2] = bz * 22; e.vel[1] = -2;
-    e.yaw = Math.atan2(-bx, -bz);
-    e.glide = false;
-  }
-  G.bus = { x: sx + bx * HALF * 1.6, z: sz + bz * HALF * 1.6, y: 178, dx: bx, dz: bz, t: 0 };
+    // battle-bus line across the map: everyone has just jumped, spread along the
+    // bus's path; the bus itself is ahead of the last jumper and flies on
+    const busA = rnd(0, Math.PI * 2);
+    const bx = Math.cos(busA), bz = Math.sin(busA);
+    const sx = -bx * HALF * 0.85, sz = -bz * HALF * 0.85;
+    let hi = 0;
+    for (let i = 0; i < G.ents.length; i++) {
+      const e = G.ents[i];
+      const s = e.human ? HALF * 0.9 - (hi++) * 4 : rnd(HALF * 0.2, HALF * 1.5);
+      e.pos[0] = clamp(sx + bx * s + rnd(-6, 6), -HALF + 20, HALF - 20);
+      e.pos[2] = clamp(sz + bz * s + rnd(-6, 6), -HALF + 20, HALF - 20);
+      e.pos[1] = rnd(150, 172);
+      e.vel[0] = bx * 22; e.vel[2] = bz * 22; e.vel[1] = -2;
+      e.yaw = Math.atan2(-bx, -bz);
+      e.glide = false;
+    }
+    G.bus = { x: sx + bx * HALF * 1.6, z: sz + bz * HALF * 1.6, y: 178, dx: bx, dz: bz, t: 0 };
 
-  G.storm = {
-    cx: rnd(-40, 40), cz: rnd(-40, 40), r: HALF * 1.45,
-    tcx: 0, tcz: 0, tr: HALF * 1.45,
-    phase: -1, timer: 4, shrinking: false, dps: 0, r0: HALF * 1.45, tickT: 0,
-  };
-  nextStormPhase();
+    G.storm = {
+      cx: rnd(-40, 40), cz: rnd(-40, 40), r: HALF * 1.45,
+      tcx: 0, tcz: 0, tr: HALF * 1.45,
+      phase: -1, timer: 4, shrinking: false, dps: 0, r0: HALF * 1.45, tickT: 0,
+    };
+    nextStormPhase();
+  });
+  // remote entities are placed by the network, so the drop never waits on them
+  for (const e of G.ents) if (e.remote) e.landed = true;
   G.alive = G.ents.length;
   G.state = 'drop';
   say(Input.padActive ? 'DROP IN — hold the left stick forward to dive' : 'DROP IN — hold W to dive');
 }
+
+function entById(id) { for (const e of G.ents) if (e.id === id) return e; return null; }
 
 function nextStormPhase() {
   const s = G.storm;
@@ -164,6 +194,13 @@ function nextStormPhase() {
 function updateStorm(dt) {
   const s = G.storm;
   s.timer -= dt;
+  if (!World.authority) {   // phase changes and damage come from the host
+    if (s.shrinking) {
+      const k = 1 - clamp(s.timer / s.shrinkDur, 0, 1);
+      s.r = lerp(s.fromR, s.tr, k); s.cx = lerp(s.fromX, s.tcx, k); s.cz = lerp(s.fromZ, s.tcz, k);
+    }
+    return;
+  }
   if (s.timer <= 0) {
     if (!s.shrinking) {
       s.shrinking = true; s.timer = s.shrinkDur;
@@ -212,6 +249,37 @@ function rayEntities(ox, oy, oz, dx, dy, dz, maxT, ignore) {
   return best;
 }
 
+// Where a hit goes. Solo and the lobby host apply it; a client shows the hit
+// (marker, number, flinch) and reports it to the host, who owns everyone's health.
+function dealDamage(target, dmg, attacker, head) {
+  if (World.authority) { applyDamage(target, dmg, attacker, head, false); return; }
+  if (!target.alive) return;
+  target.hurtT = 0.25;
+  playUpper(target, 'Hit_A', 0.45);
+  if (attacker === G.player) {
+    G.hitMark = 0.14; if (head) G.critMark = 0.2;
+    Sfx.hit();
+    pushDamage(target.pos[0], target.pos[1] + 1.8, target.pos[2], Math.round(dmg), head);
+    Net.hit(target, dmg, head);
+  }
+}
+function dealPieceDamage(p, dmg, harvest) {
+  if (World.authority) return damagePiece(p, dmg, harvest);
+  p.hp -= dmg;                                   // predicted — the host says when it actually goes
+  if (!(p.hitT > 0)) World.flashing.push(p);
+  p.hitT = 0.18;
+  Net.dmgPiece(p.key, dmg, harvest);
+  return harvest ? (p.hp <= 0 ? 30 : 12) : 0;
+}
+function dealPropDamage(p, dmg) {
+  if (World.authority) return damageProp(p, dmg);
+  p.hp -= dmg;
+  if (!(p.hitT > 0)) World.flashing.push(p);
+  p.hitT = 0.15;
+  Net.dmgProp(p.id, dmg);
+  return p.hp <= 0 ? 34 : 15;
+}
+
 function applyDamage(target, dmg, attacker, head, byStorm) {
   if (!target.alive) return;
   let d = dmg;
@@ -228,7 +296,7 @@ function applyDamage(target, dmg, attacker, head, byStorm) {
   if (target.hp <= 0) eliminate(target, attacker, byStorm);
 }
 
-function eliminate(e, attacker, byStorm) {
+function eliminate(e, attacker, byStorm, placement) {
   if (!e.alive) return;
   e.alive = false; e.hp = 0; e.deadT = 0;
   if (e.anim) e.anim.play('Death_A', 0.08, false, true);
@@ -236,25 +304,28 @@ function eliminate(e, attacker, byStorm) {
   G.alive--;
   if (attacker && attacker !== e) attacker.kills++;
   // everything they were carrying bursts out of them where they fell
-  const spill = [];
-  for (let i = 1; i < 5; i++) if (e.inv[i]) spill.push(e.inv[i]);
-  for (const it of spill) {
-    const kind = (it.id === 'shield' || it.id === 'medkit') ? it.id : 'weapon';
-    tossLoot(spawnLoot(kind, e.pos[0], e.pos[1] + 1.1, e.pos[2], { item: it }),
+  if (World.authority) {
+    const spill = [];
+    for (let i = 1; i < 5; i++) if (e.inv[i]) spill.push(e.inv[i]);
+    for (const it of spill) {
+      const kind = (it.id === 'shield' || it.id === 'medkit') ? it.id : 'weapon';
+      tossLoot(spawnLoot(kind, e.pos[0], e.pos[1] + 1.1, e.pos[2], { item: it }),
+        rnd(-3, 3), rnd(4.5, 7), rnd(-3, 3), 0.4);
+    }
+    tossLoot(spawnAmmoLoot(e.pos[0], e.pos[1] + 1.1, e.pos[2], pick(AMMO_TYPES), 45),
       rnd(-3, 3), rnd(4.5, 7), rnd(-3, 3), 0.4);
-  }
-  tossLoot(spawnAmmoLoot(e.pos[0], e.pos[1] + 1.1, e.pos[2], pick(AMMO_TYPES), 45),
-    rnd(-3, 3), rnd(4.5, 7), rnd(-3, 3), 0.4);
-  for (let m = 0; m < 3; m++) {
-    if (e.mats[m] < 30) continue;
-    tossLoot(spawnLoot('mats', e.pos[0], e.pos[1] + 1.1, e.pos[2], { mat: m, n: Math.min(e.mats[m], 90) | 0 }),
-      rnd(-3, 3), rnd(4.5, 7), rnd(-3, 3), 0.4);
+    for (let m = 0; m < 3; m++) {
+      if (e.mats[m] < 30) continue;
+      tossLoot(spawnLoot('mats', e.pos[0], e.pos[1] + 1.1, e.pos[2], { mat: m, n: Math.min(e.mats[m], 90) | 0 }),
+        rnd(-3, 3), rnd(4.5, 7), rnd(-3, 3), 0.4);
+    }
   }
   spawnParticles(e.pos[0], e.pos[1] + 1.0, e.pos[2], 18, [0.95, 0.35, 0.35], 5, 0.16, 0.7, 14);
   addFeed(byStorm ? 'Storm' : (attacker ? attacker.name : '???'), e.name);
+  if (Net.hosting) Net.elim(e, attacker, byStorm, G.alive + 1);
 
   if (e === G.player) {
-    G.placement = G.alive + 1;
+    G.placement = placement || G.alive + 1;
     G.state = 'dead';
     Sfx.elim();
     if (document.pointerLockElement) document.exitPointerLock();
@@ -262,11 +333,13 @@ function eliminate(e, attacker, byStorm) {
     G.elimFlash = 1.2; Sfx.elim();
     say('ELIMINATED ' + e.name);
   }
+  if (!World.authority) return;   // a client hears the result from the host
   if (G.state !== 'dead' && G.alive <= 1 && G.player.alive) {
     G.state = 'win'; G.placement = 1; Sfx.win();
     if (G.player.anim) G.player.anim.play('Cheer', 0.2, true);
     if (document.pointerLockElement) document.exitPointerLock();
   }
+  if (Net.hosting && G.alive <= 1) Net.end(G.ents.find(x => x.alive) || null);
 }
 
 function pushDamage(x, y, z, val, crit) {
@@ -318,20 +391,20 @@ function fireShot(e, ox, oy, oz, dx, dy, dz, dmg, range, tracerCol) {
   let end = hitStatic ? hitStatic.t : range;
   if (hitEnt) {
     end = hitEnt.t;
-    applyDamage(hitEnt.ent, dmg * (hitEnt.head ? HEAD_MUL : 1), e, hitEnt.head);
+    dealDamage(hitEnt.ent, dmg * (hitEnt.head ? HEAD_MUL : 1), e, hitEnt.head);
     spawnParticles(ox + dx * end, oy + dy * end, oz + dz * end, 4, [0.9, 0.25, 0.25], 2.5, 0.09, 0.4, 12);
   } else if (hitStatic) {
     const c = hitStatic.col;
     const hx = ox + dx * end, hy = oy + dy * end, hz = oz + dz * end;
-    if (c.kind === 'piece') { damagePiece(c.ref, dmg * 0.85, false); materialChips(MAT_COLOR[c.ref.mat], hx, hy, hz, 4); }
-    else if (c.kind === 'prop') { damageProp(c.ref, dmg * 0.8); materialChips(MAT_COLOR[c.ref.mat], hx, hy, hz, 4); }
+    if (c.kind === 'piece') { dealPieceDamage(c.ref, dmg * 0.85, false); materialChips(MAT_COLOR[c.ref.mat], hx, hy, hz, 4); }
+    else if (c.kind === 'prop') { dealPropDamage(c.ref, dmg * 0.8); materialChips(MAT_COLOR[c.ref.mat], hx, hy, hz, 4); }
     else spawnParticles(hx, hy, hz, 3, [0.55, 0.45, 0.32], 2, 0.1, 0.4, 14);
   }
-  G.tracers.push({
-    ax: ox, ay: oy, az: oz,
-    bx: ox + dx * end, by: oy + dy * end, bz: oz + dz * end,
-    t: 0.055, col: tracerCol
-  });
+  pushTracer(ox, oy, oz, ox + dx * end, oy + dy * end, oz + dz * end, tracerCol);
+  if (Net.inMatch) Net.tracer(e, ox, oy, oz, ox + dx * end, oy + dy * end, oz + dz * end);
+}
+function pushTracer(ax, ay, az, bx, by, bz, col) {
+  G.tracers.push({ ax, ay, az, bx, by, bz, t: 0.055, col });
   if (G.tracers.length > 120) G.tracers.shift();
 }
 
@@ -409,14 +482,14 @@ function swingPickaxe(e) {
   const hitEnt = rayEntities(ox, oy, oz, dir[0], dir[1], dir[2], range, e);
   const hitStatic = rayWorld(ox, oy, oz, dir[0], dir[1], dir[2], range);
   if (hitEnt && (!hitStatic || hitEnt.t < hitStatic.t)) {
-    applyDamage(hitEnt.ent, WEAPONS.pickaxe.dmg, e, hitEnt.head);
+    dealDamage(hitEnt.ent, WEAPONS.pickaxe.dmg, e, hitEnt.head);
     return;
   }
   if (!hitStatic) return;
   const c = hitStatic.col;
   let mats = 0, matType = MAT_WOOD;
-  if (c.kind === 'prop') { mats = damageProp(c.ref, WEAPONS.pickaxe.harvest); matType = c.ref.mat; }
-  else if (c.kind === 'piece') { mats = damagePiece(c.ref, WEAPONS.pickaxe.harvest, true); matType = c.ref.mat; }
+  if (c.kind === 'prop') { mats = dealPropDamage(c.ref, WEAPONS.pickaxe.harvest); matType = c.ref.mat; }
+  else if (c.kind === 'piece') { mats = dealPieceDamage(c.ref, WEAPONS.pickaxe.harvest, true); matType = c.ref.mat; }
   else return;
   const t = hitStatic.t;
   materialChips(MAT_COLOR[matType], ox + dir[0] * t, oy + dir[1] * t, oz + dir[2] * t, 7);
@@ -485,6 +558,7 @@ function tryBuild(e) {
   const p = addPiece(plan.type, plan.gx, plan.gy, plan.gz, plan.rot, e.buildMat, e);
   if (!p) return false;
   p.born = G.t;
+  if (Net.inMatch) Net.piecePlaced(p, e);
   e.mats[e.buildMat] -= BUILD_COST;
   e.buildT = 0.14;
   playUpper(e, 'Interact', 0.3);
@@ -581,7 +655,8 @@ function updatePlayer(e, dt) {
   if (e.useT > 0) {
     e.useT -= dt;
     if (e.useT <= 0) {
-      if (e.useKind === 'shield') e.shield = Math.min(100, e.shield + 50);
+      if (!World.authority) Net.heal(e.useKind);   // the host keeps the health
+      else if (e.useKind === 'shield') e.shield = Math.min(100, e.shield + 50);
       else e.hp = Math.min(100, e.hp + 100);
       e.inv[e.slot] = null; e.useKind = null; Sfx.pickup();
     }
@@ -775,24 +850,56 @@ function interact(e) {
   // chests first
   const ch = nearChest(e);
   if (ch) {
-    ch.opened = true; ch.openT = 0;
-    const n = 3 + ((Math.random() * 2) | 0);
-    const before = World.loot.length;
-    for (let i = 0; i < n; i++) randomLootAt(ch.x, ch.y + 0.9, ch.z, 1);
-    // fling the contents out of the lid so they visibly come from the chest
-    for (let i = before; i < World.loot.length; i++) {
-      const a = ((i - before) / n) * Math.PI * 2 + rnd(-0.4, 0.4);
-      tossLoot(World.loot[i], Math.cos(a) * rnd(3.5, 6), rnd(6, 8.5), Math.sin(a) * rnd(3.5, 6), 0.5);
-    }
-    spawnParticles(ch.x, ch.y + 0.8, ch.z, 14, [1.0, 0.85, 0.35], 3.5, 0.1, 0.8, 6);
     playUpper(e, 'Interact', 0.6);
-    sfxNear(e, Sfx.pickup.bind(Sfx)); if (e === G.player) say('CHEST OPENED');
+    if (!World.authority) { Net.chest(World.chests.indexOf(ch)); return; }   // the host rolls the loot
+    openChest(ch, e);
     return;
   }
   // then whatever you are pointing at. Bots have no crosshair, so they still grab
   // the nearest thing instead.
   const l = e === G.player ? lookedAtLoot(e, PICKUP_RANGE) : nearestLoot(e, 2.4);
-  if (l && takeLoot(e, l, e === G.player)) playUpper(e, 'PickUp', 0.5);
+  if (l && requestTake(e, l, e === G.player)) playUpper(e, 'PickUp', 0.5);
+}
+
+// Roll and fling a chest's contents (solo / host). `e` is whoever opened it.
+function openChest(ch, e) {
+  if (ch.opened) return;
+  ch.opened = true; ch.openT = 0;
+  const n = 3 + ((Math.random() * 2) | 0);
+  const before = World.loot.length;
+  for (let i = 0; i < n; i++) randomLootAt(ch.x, ch.y + 0.9, ch.z, 1);
+  // fling the contents out of the lid so they visibly come from the chest
+  for (let i = before; i < World.loot.length; i++) {
+    const a = ((i - before) / n) * Math.PI * 2 + rnd(-0.4, 0.4);
+    tossLoot(World.loot[i], Math.cos(a) * rnd(3.5, 6), rnd(6, 8.5), Math.sin(a) * rnd(3.5, 6), 0.5);
+  }
+  if (Net.hosting) Net.chestOpened(World.chests.indexOf(ch));
+  chestBurst(ch, e);
+}
+function chestBurst(ch, e) {
+  spawnParticles(ch.x, ch.y + 0.8, ch.z, 14, [1.0, 0.85, 0.35], 3.5, 0.1, 0.8, 6);
+  if (e) { sfxNear(e, Sfx.pickup.bind(Sfx)); if (e === G.player) say('CHEST OPENED'); }
+}
+
+// Picking something up. Solo and the host just take it; a client asks the host,
+// who removes the item for everyone and tells the taker to pocket it — so two
+// people lunging for one gun can't both get it.
+function requestTake(e, l, swap) {
+  if (World.authority) return takeLoot(e, l, swap);
+  if (l.cool > 0) return false;
+  if (l.kind !== 'ammo' && l.kind !== 'mats') {
+    const free = e.inv.findIndex((x, i) => i > 0 && !x) > 0;
+    if (!free && !swap) return false;
+  }
+  return Net.take(l, swap);
+}
+
+// A dropped or swapped-out item. Solo and the host spawn it; a client asks the
+// host to, so the item gets one id everyone agrees on.
+function netDropLoot(kind, x, y, z, data, vx, vy, vz, cool) {
+  if (World.authority) return tossLoot(spawnLoot(kind, x, y, z, data), vx, vy, vz, cool);
+  Net.drop({ kind, x, y, z, data, vx, vy, vz, cool });
+  return null;
 }
 function firstEmptyOr(e) { for (let i = 1; i < 5; i++) if (!e.inv[i]) return i; return 1; }
 
@@ -827,13 +934,13 @@ function lookedAtLoot(e, range) {
 function takeLoot(e, l, swap) {
   if (l.cool > 0) return false;
   if (l.kind === 'ammo') {
-    e.ammo[l.data.type] += l.data.n; removeLoot(l); sfxNear(e, Sfx.pickup.bind(Sfx));
+    e.ammo[l.data.type] += l.data.n; removeLoot(l, e.id); sfxNear(e, Sfx.pickup.bind(Sfx));
     if (e === G.player) say('PICKED UP ' + l.data.n + ' ' + l.data.type.toUpperCase() + ' AMMO');
     return true;
   }
   if (l.kind === 'mats') {
     e.mats[l.data.mat] = Math.min(999, e.mats[l.data.mat] + l.data.n);
-    removeLoot(l); sfxNear(e, Sfx.pickup.bind(Sfx));
+    removeLoot(l, e.id); sfxNear(e, Sfx.pickup.bind(Sfx));
     return true;
   }
   // weapons, shields and medkits all want an inventory slot
@@ -843,11 +950,11 @@ function takeLoot(e, l, swap) {
   const old = e.inv[slot];
   e.inv[slot] = l.kind === 'weapon' ? l.data.item
     : { id: l.kind, rar: l.kind === 'shield' ? 2 : 3, mag: 0 };
-  removeLoot(l);
+  removeLoot(l, e.id);
   if (old) {   // whatever was in that slot goes back on the ground
     const fx = -Math.sin(e.yaw), fz = -Math.cos(e.yaw);
-    tossLoot(spawnLoot(old.id === 'shield' || old.id === 'medkit' ? old.id : 'weapon',
-      e.pos[0] + fx * 0.5, e.pos[1] + 1.2, e.pos[2] + fz * 0.5, { item: old }),
+    netDropLoot(old.id === 'shield' || old.id === 'medkit' ? old.id : 'weapon',
+      e.pos[0] + fx * 0.5, e.pos[1] + 1.2, e.pos[2] + fz * 0.5, { item: old },
       fx * 4.5, 3.2, fz * 4.5, 1.1);
   }
   sfxNear(e, Sfx.pickup.bind(Sfx));
@@ -872,9 +979,9 @@ function dropHeld(e) {
   const it = e.inv[e.slot];
   if (!it) return false;
   const fx = -Math.sin(e.yaw), fz = -Math.cos(e.yaw);
-  const l = spawnLoot(it.id === 'shield' || it.id === 'medkit' ? it.id : 'weapon',
-    e.pos[0] + fx * 0.6, e.pos[1] + 1.25, e.pos[2] + fz * 0.6, { item: it });
-  tossLoot(l, fx * 6.5, 3.4, fz * 6.5, 1.1);
+  netDropLoot(it.id === 'shield' || it.id === 'medkit' ? it.id : 'weapon',
+    e.pos[0] + fx * 0.6, e.pos[1] + 1.25, e.pos[2] + fz * 0.6, { item: it },
+    fx * 6.5, 3.4, fz * 6.5, 1.1);
   e.inv[e.slot] = null;
   if (e.reloadT > 0) e.reloadT = 0;
   if (e.useT > 0) { e.useT = 0; e.useKind = null; }
@@ -895,8 +1002,8 @@ function dropAmmo(e) {
   const n = Math.min(e.ammo[type], 30);
   e.ammo[type] -= n;
   const fx = -Math.sin(e.yaw), fz = -Math.cos(e.yaw);
-  const l = spawnAmmoLoot(e.pos[0] + fx * 0.6, e.pos[1] + 1.25, e.pos[2] + fz * 0.6, type, n);
-  tossLoot(l, fx * 5.5, 3.2, fz * 5.5, 1.1);
+  netDropLoot('ammo', e.pos[0] + fx * 0.6, e.pos[1] + 1.25, e.pos[2] + fz * 0.6, { type, n },
+    fx * 5.5, 3.2, fz * 5.5, 1.1);
   playUpper(e, 'Throw', 0.5);
   Sfx.swing();
   if (e === G.player) say('DROPPED ' + n + ' ' + type.toUpperCase());
@@ -912,7 +1019,12 @@ function nearestLoot(e, rad) {
   }
   return best;
 }
-function removeLoot(l) { const i = World.loot.indexOf(l); if (i >= 0) World.loot.splice(i, 1); }
+function removeLoot(l, by) {
+  const i = World.loot.indexOf(l);
+  if (i < 0) return;
+  World.loot.splice(i, 1);
+  if (Net.hosting) Net.lootGone(l, by);
+}
 
 // Walking over something only collects materials and ammo. Guns and heals have to
 // be picked up deliberately with E / X so you never swallow a worse weapon by
@@ -925,7 +1037,7 @@ function autoPickup(e) {
     if (restricted && !AUTO_KINDS[l.kind]) continue;
     if (l.cool > 0) continue;
     if (dist2(e.pos[0], e.pos[2], l.x, l.z) > 2.6 || Math.abs(l.y - e.pos[1]) > 3) continue;
-    takeLoot(e, l, false);
+    requestTake(e, l, false);
   }
 }
 
@@ -1198,9 +1310,10 @@ function renderScene() {
   } else if (G.debugCam) {
     cam = G.debugCam; yaw = cam.yaw; pitch = cam.pitch; fov = 1.1;
   } else {
-    cam = cameraState(p);
-    yaw = p.yaw; pitch = p.pitch;
-    fov = p.fov === undefined ? FOV.base : p.fov;   // eased in updateCamera
+    const ce = (G.spec && !p.alive) ? G.spec : p;   // spectating follows someone else
+    cam = cameraState(ce);
+    yaw = ce.yaw; pitch = ce.pitch;
+    fov = ce.fov === undefined ? FOV.base : ce.fov;   // eased in updateCamera
   }
   R.time = G.t + G.menuT;
   R.begin(cam.x, cam.y, cam.z, yaw, pitch, fov);
@@ -1492,6 +1605,8 @@ function drawLoot(l) {
 // Start (or restart) an upper-body one-shot: a gunshot, a swing, a reload…
 function playUpper(e, name, dur) {
   e.upper = { name, t: 0, dur: dur || 0.4 };
+  e.upSeq = (e.upSeq | 0) + 1;      // remote copies replay one-shots when this changes
+  e.upName = name; e.upDur = dur || 0.4;
 }
 
 const _maskCache = new Map();
@@ -1671,7 +1786,12 @@ function drawHUD() {
     drawFeed(W, H);
     if (p.alive) { drawBars(W, H); drawSlots(W, H); drawMats(W, H); drawCrosshair(W, H); drawTargetInfo(W, H); }
     if (G.state === 'play') drawLootLabels();
+    if (Net.inMatch) drawNameTags();
     drawDamageNumbers(W, H);
+    if (G.spec && !p.alive) {
+      hud.font = '700 15px system-ui, sans-serif'; hud.textAlign = 'center'; hud.fillStyle = 'rgba(255,255,255,.85)';
+      hud.fillText('SPECTATING  ' + G.spec.name.toUpperCase() + '   ·   click to switch   ·   Esc twice for the menu', W / 2, H - 40);
+    }
     if (G.msgT > 0) {
       hud.globalAlpha = clamp(G.msgT, 0, 1);
       hud.font = '800 24px system-ui, sans-serif';
@@ -2094,6 +2214,34 @@ function drawLootLabels() {
   hud.restore();
 }
 
+// The other humans' names float over their heads with a sliver of health, so
+// friends can tell each other apart from the bots at a glance.
+function drawNameTags() {
+  const p = G.player;
+  hud.save();
+  hud.setTransform(1, 0, 0, 1, 0, 0);
+  const W = hudCv.width, H = hudCv.height, S = clamp(W / 1400, 0.5, 1.15);
+  hud.textAlign = 'center';
+  for (const e of G.ents) {
+    if (e === p || !e.human || !e.alive) continue;
+    const d = dist2(p.pos[0], p.pos[2], e.pos[0], e.pos[2]);
+    if (d > 90 * 90) continue;
+    if (!projectPoint(R.vp, e.pos[0], e.pos[1] + 2.35, e.pos[2], W, H, _scr)) continue;
+    const far = clamp(1 - Math.sqrt(d) / 90, 0.35, 1);
+    hud.globalAlpha = far;
+    hud.font = '700 ' + (13 * S).toFixed(1) + 'px system-ui, sans-serif';
+    hud.fillStyle = '#fff'; hud.strokeStyle = 'rgba(0,0,0,.7)'; hud.lineWidth = 3;
+    hud.strokeText(e.name, _scr[0], _scr[1]);
+    hud.fillText(e.name, _scr[0], _scr[1]);
+    const w = 44 * S, h = 4 * S, x = _scr[0] - w / 2, y = _scr[1] + 8 * S;
+    hud.fillStyle = 'rgba(0,0,0,.55)'; hud.fillRect(x, y, w, h);
+    hud.fillStyle = '#5ee36a'; hud.fillRect(x, y, w * clamp(e.hp / 100, 0, 1), h);
+    if (e.shield > 0) { hud.fillStyle = '#4fa8ff'; hud.fillRect(x, y - h - 1, w * clamp(e.shield / 100, 0, 1), h); }
+  }
+  hud.globalAlpha = 1;
+  hud.restore();
+}
+
 function drawDamageNumbers() {
   // world-space projection needs real pixels, so drop the HUD scale transform
   hud.save();
@@ -2131,11 +2279,18 @@ function update(dt) {
 
   const simulate = G.state !== 'menu';
   if (simulate) {
+    const now = performance.now();
     for (const e of G.ents) {
       if (e === p) continue;
-      if (e.alive) updateBot(e, dt);
+      if (e.remote) Net.interp(e, now);
+      else if (e.alive) updateBot(e, dt);
       if (e.muzzleT > 0) e.muzzleT -= dt;
       if (e.hurtT > 0) e.hurtT -= dt;
+    }
+    // spectating: follow someone who is still in it, click to move on
+    if (G.spec && !p.alive) {
+      if (!G.spec.alive || Input.clicked[0]) G.spec = nextSpectate(G.spec);
+      if (G.spec) updateCamera(G.spec, dt);
     }
     updateLoot(dt);
     updateSupport();
@@ -2163,6 +2318,15 @@ function update(dt) {
     f.hitT -= dt;
     if (f.hitT <= 0) { f.hitT = 0; World.flashing[i] = World.flashing[World.flashing.length - 1]; World.flashing.pop(); }
   }
+  if (Net.inMatch) Net.tick(dt);
+}
+
+// Who to watch next after dying in a lobby: the other humans first, then bots.
+function nextSpectate(cur) {
+  const order = G.ents.filter(e => e.alive && e !== G.player).sort((a, b) => (b.human - a.human) || (a.id - b.id));
+  if (!order.length) return null;
+  const i = order.indexOf(cur);
+  return order[(i + 1) % order.length];
 }
 
 let lastT = 0;
@@ -2172,7 +2336,7 @@ function frame(now) {
   lastT = now;
   Input.pollPad();
   // Start / A works the menu and the end screen, so a pad never needs the mouse.
-  if (G.state === 'menu' || G.state === 'dead' || G.state === 'win') {
+  if ((G.state === 'menu' || G.state === 'dead' || G.state === 'win') && !Net.active) {
     if (Input.padHit(PAD.START) || Input.padHit(PAD.A)) { startGame(); Input.endFrame(); return; }
   }
   const hw = Math.floor(window.innerWidth), hh = Math.floor(window.innerHeight);
@@ -2204,8 +2368,9 @@ function frame(now) {
 let _ovState = null, _ovDead = null, _ovTitle = null, _ovSub = null;
 
 function updateOverlays() {
-  const key = (G.state === 'dead' || G.state === 'win')
-    ? G.state + '|' + G.placement + '|' + G.player.kills : 'hidden';
+  const mp = Net.active;
+  const showing = (G.state === 'dead' || G.state === 'win') && !(G.spec && !G.player.alive);
+  const key = showing ? G.state + '|' + G.placement + '|' + G.player.kills + '|' + Net.endTitle + '|' + mp + '|' + (G.alive > 0) : 'hidden';
   if (key === _ovState) return;
   _ovState = key;
   if (!_ovDead) {
@@ -2215,20 +2380,37 @@ function updateOverlays() {
   }
   if (key === 'hidden') { _ovDead.style.display = 'none'; return; }
   _ovDead.style.display = 'flex';
-  _ovTitle.textContent = G.state === 'win' ? '#1 VICTORY ROYALE' : 'ELIMINATED';
-  _ovTitle.style.color = G.state === 'win' ? '#ffd24a' : '#ff6b6b';
+  const won = G.state === 'win';
+  _ovTitle.textContent = won ? '#1 VICTORY ROYALE' : (Net.endTitle || 'ELIMINATED');
+  _ovTitle.style.color = won ? '#ffd24a' : '#ff6b6b';
   _ovSub.textContent =
-    (G.state === 'win' ? 'You outlasted everyone' : '#' + G.placement + ' of ' + PLAYER_COUNT) +
+    (won ? 'You outlasted everyone' : '#' + G.placement + ' of ' + G.ents.length) +
     '  ·  ' + G.player.kills + ' elimination' + (G.player.kills === 1 ? '' : 's');
+  document.getElementById('againBtn').style.display = mp ? 'none' : '';
+  document.getElementById('specBtn').style.display = (mp && !won && !Net.endTitle && G.alive > 0) ? '' : 'none';
+  document.getElementById('lobbyBtn').style.display = mp ? '' : 'none';
+  document.getElementById('endNote').style.display = mp ? 'none' : '';
 }
 
-function startGame() {
+function startGame(setup) {
+  if (!setup && Net.active) Net.leave();   // DROP IN alone means leaving the lobby
   Sfx.init();
-  newMatch();
+  Net.endTitle = '';
+  newMatch(setup || null);
   document.getElementById('menu').style.display = 'none';
   document.getElementById('endScreen').style.display = 'none';
+  _ovState = null;
   // A pad drives the camera directly — grabbing the mouse would only get in the way.
   if (!Input.padActive && !window.__NOLOCK) R.canvas.requestPointerLock();
+}
+
+// Back to the front screen (the lobby panel stays open while connected).
+function showMenu() {
+  G.state = 'menu'; G.spec = null;
+  document.getElementById('endScreen').style.display = 'none';
+  document.getElementById('menu').style.display = '';
+  _ovState = null;
+  if (document.pointerLockElement) document.exitPointerLock();
 }
 
 // Every model the game can use. Props fall back to boxes, characters to the
@@ -2279,8 +2461,21 @@ function boot() {
   Assets.loadAll(MANIFEST);
 
   addEventListener('resize', () => R.resize());
-  document.getElementById('playBtn').addEventListener('click', startGame);
-  document.getElementById('againBtn').addEventListener('click', startGame);
+  document.getElementById('playBtn').addEventListener('click', () => startGame());
+  document.getElementById('againBtn').addEventListener('click', () => startGame());
+  document.getElementById('specBtn').addEventListener('click', () => {
+    G.spec = nextSpectate(null);
+    document.getElementById('endScreen').style.display = 'none'; _ovState = null;
+    if (!Input.padActive) R.canvas.requestPointerLock();
+  });
+  document.getElementById('lobbyBtn').addEventListener('click', () => Net.backToLobby());
+  Net.init();
+  // The host's browser is the match for everyone in the lobby, so when its tab
+  // is hidden and requestAnimationFrame stops, keep stepping the simulation.
+  setInterval(() => {
+    if (!document.hidden || !Net.hosting || G.state === 'menu') return;
+    Input.pollPad(); update(1 / 20); Input.endFrame();
+  }, 50);
 
   // control-list tabs; a pad plugging itself in flips to its own list
   const tabKb = document.getElementById('tabKb'), tabPad = document.getElementById('tabPad');
@@ -2295,6 +2490,9 @@ function boot() {
   addEventListener('gamepadconnected', () => showPad(true));
   if (Array.from(navigator.getGamepads ? navigator.getGamepads() : []).some(p => p && p.connected)) showPad(true);
   addEventListener('keydown', e => {
+    if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT')) return;
+    if (e.code === 'Escape' && G.spec && !G.player.alive && !document.pointerLockElement) { Net.backToLobby(); return; }
+    if (Net.active) return;
     if (e.code === 'Enter' && (G.state === 'dead' || G.state === 'win' || G.state === 'menu')) startGame();
   });
 
