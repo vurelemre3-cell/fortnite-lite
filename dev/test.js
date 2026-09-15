@@ -125,12 +125,13 @@ console.log('5. placement: pieces land next to you on the grid, never inside you
   e.buildType = 0;                                       // wall
   let plan = buildPlan(e);
   ok(plan.type === 'wall' && plan.rot === 0 && plan.gz === 1 && plan.gx === 1 && plan.gy === 0, `wall goes on the z=4 line of my tile: ${JSON.stringify(plan)}`);
-  e.pos[2] = 4.3;                                        // too close to the line to stand beside a wall there
+  e.pos[2] = 4.3;                                        // straddling the line, as in Fortnite
   plan = buildPlan(e);
-  ok(plan.gz === 0 && plan.rot === 0, `standing on the line, the wall skips to the next line: ${JSON.stringify(plan)}`);
+  ok(plan.gz === 1 && plan.rot === 0, `straddling the line, the wall still goes on it: ${JSON.stringify(plan)}`);
   ok(tryBuild(e), 'and it places');
-  const w = World.pieces.get(pieceKey('wall', 1, 0, 0, 0));
-  ok(!!w && (e.pos[2] - ENT_R >= w.col.maxz - 1e-3 || e.pos[2] + ENT_R <= w.col.minz + 1e-3), 'the placed wall does not overlap the player');
+  const w = World.pieces.get(pieceKey('wall', 1, 0, 1, 0));
+  ok(!!w && e.pos[2] >= w.col.maxz + ENT_R - 1e-3, `it pushes the player back to the side they were on (z=${e.pos[2].toFixed(2)})`);
+  e.pos[2] = 6.1;
   e.yaw = Math.PI / 2;                                   // facing -X
   e.buildType = 1; plan = buildPlan(e);
   ok(plan.type === 'floor' && plan.gx === 0 && plan.gz === 1 && plan.gy === 0, `floor goes in the tile in front: ${JSON.stringify(plan)}`);
@@ -181,9 +182,10 @@ console.log('7. hillside: ground pieces are allowed on slopes and line up with n
   TERR.amp = 1; TERR.a = 1; TERR.b = 2; TERR.c = 3; TERR.d = 4; TERR.e = 5;
   _tbase.clear(); _tground.clear();
   let placed = 0, tried = 0, aligned = 0;
+  const rng = mulberry32(7);                              // fixed sample, so this never flakes
   for (let i = 0; i < 200; i++) {
-    const x = rnd(-300, 300), z = rnd(-300, 300);
-    const e = spawn(x, z); e.yaw = rnd(0, 6.28); e.buildType = 1;
+    const x = -300 + rng() * 600, z = -300 + rng() * 600;
+    const e = spawn(x, z); e.yaw = rng() * 6.28; e.buildType = 1;
     const plan = buildPlan(e); tried++;
     if (canPlace(plan.type, plan.gx, plan.gy, plan.gz, plan.rot)) {
       placed++;
@@ -194,6 +196,59 @@ console.log('7. hillside: ground pieces are allowed on slopes and line up with n
   }
   ok(placed / tried > 0.97, `${placed}/${tried} floors placeable on open hillside`);
   ok(aligned === placed, `${aligned}/${placed} within one storey of the player's feet`);
+}
+
+console.log('8. player push: build on yourself and get shoved clear, never buried, never through');
+{
+  // a wall on the line you are standing on, facing it: you end up behind it and cannot get through
+  flatWorld();
+  let e = spawn(2, 3.9); e.yaw = Math.PI; e.buildType = 0;   // facing +Z toward the z=4 line, mostly on its -Z side
+  ok(tryBuild(e), 'wall placed on the line under my feet');
+  ok(e.pos[2] <= 4 - 0.2 - ENT_R + 1e-3, `pushed to the side I was mostly on (z=${e.pos[2].toFixed(2)})`);
+  walk(e, 0, 1, WALK_SPEED * 2, 1.5, 0.05);
+  ok(e.pos[2] <= 4 - 0.2 - ENT_R + 1e-3, `and cannot sprint through it afterwards (z=${e.pos[2].toFixed(2)})`);
+  // dead centre on the line: pushed behind, not through
+  flatWorld();
+  e = spawn(2, 4.0); e.yaw = 0; e.buildType = 0;          // facing -Z, exactly on z=4
+  ok(tryBuild(e), 'wall placed exactly through me');
+  ok(e.pos[2] >= 4 + 0.2 + ENT_R - 1e-3, `a dead tie pushes me back the way I came, not forward through it (z=${e.pos[2].toFixed(2)})`);
+  walk(e, 0, -1, WALK_SPEED * 2, 1.5, 1 / 60);
+  ok(e.pos[2] >= 4 + 0.2 + ENT_R - 1e-3, `still blocked walking into it (z=${e.pos[2].toFixed(2)})`);
+  // a cone built on yourself lifts you onto it — never underground, never stuck inside
+  flatWorld();
+  e = spawn(2, 2); e.yaw = 0; e.pitch = -1.2; e.buildType = 3;
+  ok(tryBuild(e), 'cone placed on my own tile');
+  let minY = e.pos[1];
+  for (let i = 0; i < 60; i++) { e.vel[0] = e.vel[2] = 0; e.vel[1] -= 0.5; moveEntity(e, 1 / 60); minY = Math.min(minY, e.pos[1]); }
+  ok(minY >= -1e-3, `never pushed below the ground (lowest y=${minY.toFixed(2)})`);
+  ok(Math.abs(e.pos[1] - CONE_H) < 0.05, `standing on top of the cone (y=${e.pos[1].toFixed(2)})`);
+  // a ramp built on yourself puts you on its deck
+  flatWorld();
+  e = spawn(2, 2); e.yaw = 0; e.buildType = 2;
+  addPiece('ramp', 0, 0, 0, 0, MAT_WOOD, null);           // through the player, rising toward -Z
+  minY = e.pos[1];
+  for (let i = 0; i < 60; i++) { e.vel[0] = e.vel[2] = 0; e.vel[1] -= 0.5; moveEntity(e, 1 / 60); minY = Math.min(minY, e.pos[1]); }
+  const deck = rampHeightAt(World.pieces.get(pieceKey('ramp', 0, 0, 0)), e.pos[0], e.pos[2]);
+  ok(minY >= -1e-3 && Math.abs(e.pos[1] - deck) < 0.05, `on the ramp deck, not under it (y=${e.pos[1].toFixed(2)}, deck ${deck.toFixed(2)})`);
+  // walking under a ramp stops where the deck comes down to head height — no popping up through it
+  flatWorld();
+  e = spawn(2, 6);
+  addPiece('ramp', 0, 0, 0, 2, MAT_WOOD, null);           // rises toward +Z: high edge at z=4 (y=4), low edge at z=0
+  walk(e, 0, -1, WALK_SPEED * 2, 2, 1 / 60);
+  const r = World.pieces.get(pieceKey('ramp', 0, 0, 0));
+  const underHere = rampHeightAt(r, e.pos[0], e.pos[2]) - RAMP_DECK * LEV;
+  ok(e.pos[1] < 0.01 && e.pos[2] > 0.5 && e.pos[2] < 4, `stopped under the deck at z=${e.pos[2].toFixed(2)}, still on the ground`);
+  ok(e.pos[1] + ENT_H <= underHere + 0.05, `head clear of the deck (${(e.pos[1] + ENT_H).toFixed(2)} <= ${underHere.toFixed(2)})`);
+  // ...and at any frame rate
+  for (const dt of [1 / 144, 1 / 30, 0.05]) {
+    e.pos[0] = 2; e.pos[2] = 6; e.pos[1] = 0; e.vel.fill(0);
+    walk(e, 0, -1, WALK_SPEED * 2, 2, dt);
+    ok(e.pos[1] < 0.01 && e.pos[2] > 0.5, `dt=${dt.toFixed(4)}: still stopped under the deck (z=${e.pos[2].toFixed(2)}, y=${e.pos[1].toFixed(2)})`);
+  }
+  // the ramp is still walkable from its low end
+  e.pos[0] = 2; e.pos[2] = -2; e.pos[1] = 0; e.vel.fill(0);
+  walk(e, 0, 1, WALK_SPEED, 0.75, 1 / 60);
+  ok(e.onRamp && e.pos[1] > 3.0, `walked up it from the low end to y=${e.pos[1].toFixed(2)}`);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

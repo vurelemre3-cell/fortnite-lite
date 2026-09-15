@@ -147,9 +147,10 @@ heightfield and roads once per match.
   second). Shoot out the bottom ramp and the tower comes down; knock one wall
   out of a house and the roof stays on the others.
 - **Placement** (`buildPlan`, players and bots alike): Fortnite's rule. A wall
-  goes on the first grid line in front of you — skipping one you are standing
-  on — spanning your own tile; floor / ramp / cone go in the tile in front (or
-  under you when looking almost straight down). The storey is the one whose
+  goes on the first grid line in front of you — including one you are
+  straddling; the wall then pushes you clear (player push) — spanning your own
+  tile; floor / ramp / cone go in the tile in front (or under you when looking
+  almost straight down). The storey is the one whose
   floor is at or a step below your feet; on a ramp the next ramp continues from
   its top; looking up builds a storey higher, looking well down a storey lower;
   cones go a storey up when you look up. R / X turns the facing a quarter. If
@@ -168,16 +169,23 @@ heightfield and roads once per match.
 ## Collision (`moveEntity`)
 
 1. `depenetrate()` — push out of anything already overlapped (a wall built
-   through you, a floor placed under you, a ramp deck you ended up inside).
-   Shortest way out wins, except a small lift onto a surface is preferred.
-   This replaced the old "push in the direction you were moving" rule, which
-   is what let you *lag through* a wall you overlapped: walking away from it
-   teleported you to the far side.
+   through you, a floor placed under you, a ramp or cone built on top of you).
+   This is Fortnite's *player push*: cheapest way out wins, a small lift onto a
+   surface is half price, a wall sends you to the side you are mostly on (a dead
+   tie goes behind you, never through), a ramp or cone built on you lifts you
+   onto it, and dropping below a piece is only allowed while that keeps you
+   above the ground. It used to allow a push into the earth, which is how a
+   cone built on yourself buried you and then wedged you inside it. Before that
+   it was "push in the direction you were moving", which let you *lag through*
+   a wall you overlapped.
 2. Axis-separated AABB resolution (X, Z, then Y) in **sub-steps** of at most
    0.3 m, so a long frame can't tunnel through a 0.4 m wall or a 0.3 m floor.
    A ledge up to `STEP_UP` (0.85 m) is walked onto instead of blocking.
 3. Ramp / cone surfaces act as walkable ground (`surf`); from below, a ramp
-   deck and a cone body are solid ceilings.
+   deck and a cone body are solid ceilings, and from the side or underneath
+   they are solid too unless you can step onto the surface right there or fit
+   under it — so walking under a ramp stops where the deck reaches head height
+   instead of popping you up through it.
 4. Map bounds and the terrain clamp. `e.onRamp` records that the ramp support
    took over (placement uses it).
 
@@ -327,8 +335,11 @@ pages through the live server via the DevTools protocol).
   controller support, real map with heightfield, aim-assist fix and frame-cost
   pass. (History in git-less detail: the earlier CONTEXT.md.)
 
-- **v2.1 (2026-09-14)** — sprint toggle, mouse aim assist (`mouseAssist`),
-  and **multiplayer lobbies**: relay server with an inline WebSocket
+- **v2.1 (2026-09-14)** — Fortnite player push: walls place on the line you
+  straddle and shove you clear, ramps/cones built on you lift you onto them,
+  nothing pushes you into the ground, and ramp decks are solid from the side
+  and underneath (the "phase through" bug). Sprint toggle, mouse aim assist
+  (`mouseAssist`), and **multiplayer lobbies**: relay server with an inline WebSocket
   implementation, host-authoritative match with locally simulated players,
   seeded world generation, name tags, spectating, `?join=CODE` links,
   Railway-ready `package.json`, GitHub repo + Pages.

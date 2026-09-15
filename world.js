@@ -936,37 +936,49 @@ function rampHeightAt(p, x, z) {
 }
 
 // Push an entity out of anything it is already overlapping — a wall that was
-// just built through it, a floor placed under its feet, a ramp deck it ended up
-// inside. The shortest way out wins, except that a small lift onto a surface is
-// always preferred (that is how a floor built under you puts you on top of it).
+// just built through it, a floor placed under its feet, a ramp or cone it ended
+// up inside. This is Fortnite's "player push": you may build on a spot you are
+// partly standing in, and the piece shoves you clear. The cheapest way out wins:
+// a small lift onto the piece (a floor under you, the lip of a ramp) is always
+// preferred; a wall pushes you to whichever side you are mostly on, and on a dead
+// tie to the side behind you rather than through; a ramp or cone built on top of
+// you lifts you onto it; dropping below a piece is only allowed when that still
+// leaves you above the ground — never into the earth, which is what used to
+// leave you buried under a cone and then wedged inside it.
 function depenetrate(e) {
   const p = e.pos;
+  const fx = -Math.sin(e.yaw), fz = -Math.cos(e.yaw);
   for (let iter = 0; iter < 3; iter++) {
     queryBoxes(p[0] - ENT_R + 0.02, p[1] + 0.02, p[2] - ENT_R + 0.02, p[0] + ENT_R - 0.02, p[1] + ENT_H - 0.02, p[2] + ENT_R - 0.02, _q);
+    const ground = terrainHeight(p[0], p[2]);
     let bestD = Infinity, bx = 0, by = 0, bz = 0, any = false;
+    const consider = (d, dx, dy, dz) => { if (d < bestD) { bestD = d; bx = dx; by = dy; bz = dz; any = true; } };
     for (const c of _q) {
       if (c.noclip) continue;
+      let up, under;
       if (c.slope) {
         const h = c.surf(c.ref, p[0], p[2]);
         if (h === null) continue;
-        const under = c.ref.type === 'cone' ? c.miny : h - c.deck;
+        under = c.ref.type === 'cone' ? c.miny : h - c.deck;
         if (p[1] >= h - 0.01 || p[1] + ENT_H <= under + 0.01) continue;   // clear of the slab
-        const up = h - p[1], down = (p[1] + ENT_H) - under;
-        const d = up <= 1.3 ? up * 0.5 : down;   // lift onto it when it is a step, else drop below
-        if (d < bestD) { bestD = d; bx = 0; bz = 0; by = up <= 1.3 ? up : -down; any = true; }
-        continue;
+        up = h - p[1];
+      } else {
+        up = c.maxy - p[1]; under = c.miny;
       }
+      const down = (p[1] + ENT_H) - under;
       const px = c.maxx - (p[0] - ENT_R), nx = (p[0] + ENT_R) - c.minx;
       const pz = c.maxz - (p[2] - ENT_R), nz = (p[2] + ENT_R) - c.minz;
-      const up = c.maxy - p[1], down = (p[1] + ENT_H) - c.miny;
-      // candidates: (distance, dx, dy, dz)
-      let d = up <= 1.0 ? up * 0.5 : Infinity, dx = 0, dy = up, dz = 0;   // step up onto it
-      if (px < d) { d = px; dx = px; dy = 0; dz = 0; }
-      if (nx < d) { d = nx; dx = -nx; dy = 0; dz = 0; }
-      if (pz < d) { d = pz; dx = 0; dy = 0; dz = pz; }
-      if (nz < d) { d = nz; dx = 0; dy = 0; dz = -nz; }
-      if (down < d && up > 1.0) { d = down; dx = 0; dy = -down; dz = 0; }
-      if (d < bestD) { bestD = d; bx = dx; by = dy; bz = dz; any = true; }
+      // up onto it: a step is half price so a floor under your feet always lifts you
+      consider(up <= (c.slope ? 1.3 : 1.0) ? up * 0.5 : up, 0, up, 0);
+      // sideways, a near tie broken toward your back
+      const TIE = 0.15;
+      const tx = Math.abs(px - nx) < TIE, tz = Math.abs(pz - nz) < TIE;
+      consider(px + (tx && fx > 0 ? TIE : 0), px, 0, 0);
+      consider(nx + (tx && fx < 0 ? TIE : 0), -nx, 0, 0);
+      consider(pz + (tz && fz > 0 ? TIE : 0), 0, 0, pz);
+      consider(nz + (tz && fz < 0 ? TIE : 0), 0, 0, -nz);
+      // down under it, only while that keeps you above the ground
+      if (p[1] - down >= ground - 0.01) consider(down, 0, -down, 0);
     }
     if (!any) return iter > 0;
     p[0] += bx; p[1] += by; p[2] += bz;
@@ -1008,13 +1020,20 @@ function moveEntity(e, dt) {
     for (const c of _q) {
       if (c.noclip) continue;
       if (c.slope) {
-        // ramp deck / cone body from below: a solid ceiling
-        if (axis === 1 && delta > 0) {
-          const h = c.surf(c.ref, p[0], p[2]);
-          if (h === null) continue;
-          const under = c.ref.type === 'cone' ? c.miny : h - c.deck;
-          if (before + ENT_H <= under + 0.02 && p[1] + ENT_H > under) { p[1] = under - ENT_H; v[1] = 0; }
+        const h = c.surf(c.ref, p[0], p[2]);
+        if (h === null) continue;
+        const under = c.ref.type === 'cone' ? c.miny : h - c.deck;
+        if (axis === 1) {
+          // ramp deck / cone body from below: a solid ceiling
+          if (delta > 0 && before + ENT_H <= under + 0.02 && p[1] + ENT_H > under) { p[1] = under - ENT_H; v[1] = 0; }
+          continue;
         }
+        // From the side or from underneath the slab is solid too: unless you can
+        // step onto its surface here, or you fit under it, the move is refused.
+        // This is what stops you walking under a ramp and popping up through the
+        // deck where it comes down to head height.
+        if (p[1] >= h - STEP_UP || p[1] + ENT_H <= under + 0.02) continue;
+        p[axis] = before; v[axis] = 0;
         continue;
       }
       if (axis === 0 || axis === 2) {

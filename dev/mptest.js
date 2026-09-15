@@ -24,9 +24,13 @@ function route(fromId, m) {
   else deliver(m.to, env);
 }
 
+// One simulated clock for both sides: the sim runs far faster than real time, so
+// interpolation (which is timestamped) must see time advance with the frames.
+let clock = 0;
+
 function makeInstance(label) {
   const sandbox = {
-    console, performance: { now: () => Date.now() }, Math, JSON, Date, Map, Set, Float32Array, Uint8Array, Uint16Array,
+    console, performance: { now: () => clock }, Math, JSON, Date, Map, Set, Float32Array, Uint8Array, Uint16Array,
     Float64Array, Int32Array, Uint32Array, ArrayBuffer, DataView, Promise, setTimeout, clearTimeout, setInterval, clearInterval,
     requestAnimationFrame: () => 0, addEventListener() {}, fetch: () => Promise.reject(new Error('no fetch')),
     location: { search: '', href: 'http://localhost/', host: 'localhost', protocol: 'http:', origin: 'http://localhost', pathname: '/' },
@@ -88,7 +92,7 @@ for (const ctx of [H, C]) {
   for (const b of ctx.G.ents) if (b.isBot) { b.pos[0] = -300; b.pos[2] = -300; b.pos[1] = ctx.terrainHeight(-300, -300); b.wander[0] = -300; b.wander[1] = -300; b.think = 999; }
 }
 function step(frames, dt) {
-  for (let i = 0; i < frames; i++) { H.update(dt); C.update(dt); H.Input.endFrame(); C.Input.endFrame(); }
+  for (let i = 0; i < frames; i++) { clock += dt * 1000; H.update(dt); C.update(dt); H.Input.endFrame(); C.Input.endFrame(); }
 }
 step(20, 1 / 20);
 // the client walks forward for a bit; the host should see it move

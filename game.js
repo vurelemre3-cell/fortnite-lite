@@ -503,8 +503,9 @@ function swingPickaxe(e) {
 
 // Fortnite's placement rule, for players and bots alike. A piece goes on the
 // grid next to you in the direction you face — a wall on the first grid line in
-// front (skipping one you are standing on), a floor / ramp / cone in the tile in
-// front — at the storey your feet are on. Looking up builds a storey higher,
+// front, even one you are straddling (the wall then pushes you clear, see
+// depenetrate), a floor / ramp / cone in the tile in front — at the storey your
+// feet are on. Looking up builds a storey higher,
 // looking well down a storey lower; the manual rotation (R / X) turns the facing
 // a quarter at a time. If that storey has nothing to hold the piece, the storeys
 // either side are tried before giving up — and the ghost always shows the result.
@@ -524,12 +525,10 @@ function buildPlan(e) {
   let plan;
   if (type === 'wall') {
     if (alongX) {
-      let line = sx > 0 ? Math.ceil(px / GRID) : Math.floor(px / GRID);
-      if (Math.abs(line * GRID - px) < ENT_R + 0.32) line += sx;
+      const line = sx > 0 ? Math.ceil(px / GRID) : Math.floor(px / GRID);
       plan = { type, gx: line, gy, gz: pgz, rot: 3 };
     } else {
-      let line = sz > 0 ? Math.ceil(pz / GRID) : Math.floor(pz / GRID);
-      if (Math.abs(line * GRID - pz) < ENT_R + 0.32) line += sz;
+      const line = sz > 0 ? Math.ceil(pz / GRID) : Math.floor(pz / GRID);
       plan = { type, gx: pgx, gy, gz: line, rot: 0 };
     }
   } else {
