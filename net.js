@@ -189,7 +189,7 @@ const Net = {
       case 'st': if (e && e.remote) this.pushState(e, d); break;
       case 'tr':
         pushTracer(d.a[0], d.a[1], d.a[2], d.b[0], d.b[1], d.b[2], d.h ? [1.0, 0.95, 0.6] : [1.0, 0.55, 0.25]);
-        if (dist2(G.player.pos[0], G.player.pos[2], d.a[0], d.a[2]) < 90 * 90) Sfx.shoot(d.w);
+        { const d2 = dist2(G.player.pos[0], G.player.pos[2], d.a[0], d.a[2]); if (d2 < 95 * 95) Sfx.shoot(d.w, clamp(1.1 - Math.sqrt(d2) / 95, 0.12, 1)); }
         break;
 
       // ---- requests to the host
@@ -267,7 +267,7 @@ const Net = {
         }
         break;
       case 'chestOpen':
-        if (fromHost) { const ch = World.chests[d.i]; if (ch && !ch.opened) { ch.opened = true; ch.openT = 0; chestBurst(ch, null); if (dist2(G.player.pos[0], G.player.pos[2], ch.x, ch.z) < 45 * 45) Sfx.pickup(); } }
+        if (fromHost) { const ch = World.chests[d.i]; if (ch && !ch.opened) { ch.opened = true; ch.openT = 0; chestBurst(ch, null); if (dist2(G.player.pos[0], G.player.pos[2], ch.x, ch.z) < 45 * 45) Sfx.chest(); } }
         break;
       case 'elim': if (fromHost) { const t = entById(d.e); if (t) eliminate(t, d.by ? entById(d.by) : null, !!d.s, d.pl); } break;
       case 'end': if (fromHost) this.onEnd(d.w); break;
@@ -331,7 +331,7 @@ const Net = {
     if (!this.client) return;
     G.alive = d.al;
     const s = G.storm, ss = d.sm;
-    if (ss.sk && !s.shrinking) say('THE STORM IS CLOSING');
+    if (ss.sk && !s.shrinking) { say('THE STORM IS CLOSING'); Sfx.warn(); }
     s.cx = ss.cx; s.cz = ss.cz; s.r = ss.r; s.tcx = ss.tcx; s.tcz = ss.tcz; s.tr = ss.tr;
     s.phase = ss.ph; s.timer = ss.tm; s.shrinking = !!ss.sk; s.dps = ss.dps;
     s.fromR = ss.fr; s.fromX = ss.fx; s.fromZ = ss.fz; s.shrinkDur = ss.sd;
