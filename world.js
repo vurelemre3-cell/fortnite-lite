@@ -43,6 +43,25 @@ const GUN_IDS = ['pistol', 'smg', 'ar', 'shotgun', 'sniper'];
 const AMMO_TYPES = ['light', 'medium', 'shells'];
 const AMMO_COLOR = { light: [0.85, 0.80, 0.45], medium: [0.85, 0.55, 0.30], shells: [0.85, 0.35, 0.35] };
 
+// Recoil profiles (the player only — bots are sloppy by spread instead), applied
+// by addRecoil / updateRecoil in game.js. Angles in degrees here, radians in play.
+//   kick    vertical climb per shot          max      cap on one burst's total climb
+//   jit     random sideways jitter per shot  jitMax   cap on the sideways drift
+//   kickT   seconds for a kick to land in the view (it rises, it doesn't jump)
+//   delay   seconds after the last shot before the view starts coming back
+//   rec     recovery rate, 1/s               frac     part of each kick that recovers
+//   ads     recoil multiplier while aiming   punch    visual gun / body jolt strength
+//   bloom   spread growth per shot           bloomMax most the cone can grow (x1 + this)
+const DEG = Math.PI / 180;
+const RECOIL = {
+  pistol:  { kick: 0.45 * DEG, max: 0.65 * DEG, jit: 0.12 * DEG, jitMax: 0.35 * DEG, kickT: 0.020, delay: 0.10, rec: 14, frac: 1.00, ads: 0.80, punch: 0.7, bloom: 0.15, bloomMax: 0.5 },
+  smg:     { kick: 0.22 * DEG, max: 0.90 * DEG, jit: 0.10 * DEG, jitMax: 0.40 * DEG, kickT: 0.020, delay: 0.14, rec: 18, frac: 0.92, ads: 0.80, punch: 0.5, bloom: 0.08, bloomMax: 0.5 },
+  ar:      { kick: 0.30 * DEG, max: 1.10 * DEG, jit: 0.12 * DEG, jitMax: 0.45 * DEG, kickT: 0.025, delay: 0.16, rec: 18, frac: 0.92, ads: 0.75, punch: 0.8, bloom: 0.10, bloomMax: 0.4 },
+  shotgun: { kick: 1.40 * DEG, max: 1.60 * DEG, jit: 0.25 * DEG, jitMax: 0.50 * DEG, kickT: 0.040, delay: 0.12, rec: 9,  frac: 0.95, ads: 0.85, punch: 1.6, bloom: 0,    bloomMax: 0 },
+  sniper:  { kick: 2.50 * DEG, max: 3.00 * DEG, jit: 0.30 * DEG, jitMax: 0.60 * DEG, kickT: 0.050, delay: 0.15, rec: 8,  frac: 0.90, ads: 0.85, punch: 2.0, bloom: 0,    bloomMax: 0 },
+};
+for (const id in RECOIL) WEAPONS[id].recoil = RECOIL[id];
+
 function rollWeapon(minRar) {
   const r = Math.random();
   let rar = r < 0.36 ? 0 : r < 0.66 ? 1 : r < 0.86 ? 2 : r < 0.96 ? 3 : 4;

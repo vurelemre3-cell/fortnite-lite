@@ -212,6 +212,37 @@ rocks, 700 bushes and 80 logs are scattered off the roads and POIs.
   tiers ×1.00 → ×1.38. Hitscan from the **gun muzzle** (`gunPoint`), converging
   on the crosshair in third person (`playerAimDir`). Shots damage pieces
   (0.85×) and props (0.8×) and throw material chips; the pickaxe harvests.
+- **Recoil** (`RECOIL` in world.js, attached as `WEAPONS[id].recoil`; `addRecoil`
+  / `updateRecoil` in game.js) kicks the local player's view only — bots never kick,
+  their inaccuracy is all spread. Each shot adds a vertical kick (±10 % random) to
+  a *target* offset the view chases over `kickT` (a fast rise, not a jump) plus a
+  capped random sideways jitter. A burst's climb is a pattern that flattens at
+  `max` — AR 1.1°, SMG 0.9°, pistol 0.65°, shotgun 1.6°, sniper 3° — so held fire
+  settles at a bounded offset instead of walking off the target; ADS scales the
+  kick (×0.75–0.85) as well as the spread. `delay` seconds after the last shot the
+  offset recovers exponentially (`rec`). The applied offset (`e.rp` / `e.ry`) is
+  tracked separately from the player's own look: whatever they (or the aim assist)
+  pull *against* the offset is taken out of the offset, not the aim, so recovery
+  only returns the un-compensated part and never overshoots below where they
+  aimed, and a deliberate over-pull stays. `frac` of each kick recovers, the rest
+  (0–10 %) stays until the player re-aims. Everything is dt-based — 30 and 144 fps
+  climb and recover identically. `dev/recoiltest.js` measures (peak / time back on
+  the aim after the last shot): AR 1.10° / 0.30 s, SMG 0.90° / 0.28 s, pistol
+  0.65° / 0.25 s, shotgun 1.5° / 0.45 s, sniper 2.2° / 0.58 s; a full AR magazine
+  at 20 m climbs 0.38 m and drifts 0.16 m sideways — inside a torso.
+  `FN.recoil(scale)` scales every kick (0 turns it off).
+- **Spread** (`shotSpread`, the one cone both the shots and the crosshair use):
+  base × 0.35 in ADS × up to 1.7 on the move (ramping with speed, full at walking
+  pace) × bloom — the player's cone grows `bloom` per shot up to `bloomMax`
+  (AR ×1.4, SMG / pistol ×1.5, none on the pump or sniper) and fades with the
+  recovery; bots get base × (7 − skill×4) × 1.7 when moving. The crosshair gap is
+  exactly this cone projected through the live FOV, plus half the un-recovered
+  recoil and a pulse per shot, so it opens on the move, closes in ADS, blooms
+  while the trigger is held and settles as the gun does. Firing sets `e.gunKick`
+  (springs back over ~0.15 s, `punch` per weapon): the first-person gun slides
+  back, hops and lifts its muzzle; in third person the gun rises and shoves back
+  along its barrel and the chest rocks — bots too, and remote players through the
+  pose's muzzle flag.
 - Time-to-kill constants: `TTK` 0.68, `BOT_DMG` 0.46, `HEAD_MUL` 1.6,
   `BOT_SHIELD` 60 — fights last, bots pause between bursts and heal.
 - Loot is physical (falls, bounces, lands on builds). Guns on the ground are the
@@ -254,7 +285,8 @@ rotate to the circle, strafe, burst, panic wall, loot real items, heal).
 loop, places the player, steps the simulation, renders one frame with a status
 line, and blits the GL frame into the HUD canvas so headless Chrome can capture
 it. `window.FN` exposes `start`, `god`, `give`, `mats`, `tp`, `assets`,
-`reload`, `shadows(false)`, `aimAssist(false)`, `sens`, `fov`, `pad`.
+`reload`, `shadows(false)`, `aimAssist(false)`, `recoil(scale)`, `sens`, `fov`,
+`pad`. `fire=N` holds the trigger for N shots.
 
 ## Input
 
@@ -263,7 +295,12 @@ control lists in `index.html`. `Input.pollPad()` folds any standard or generic
 pad into the keyboard map; aim assist (`padLook`) is a cone + slowdown +
 magnetism measured from the eye. Mouse gets a lighter version (`mouseAssist`):
 a small snap onto a nearby enemy the frame ADS starts, then gentle magnetism
-while held, released whenever the mouse moves away. Sprint (Shift / L3) is a
+while held, released whenever the mouse moves away. Recoil runs after the look
+input and the assist (`updateRecoil`, see "Combat / loot"): it measures the
+frame's own look movement against the recoil offset, so pulling down during a
+burst consumes the offset rather than the aim and the assist's pull counts as
+compensation — neither fights the recovery, and the recovery never pushes the
+view below where the player or the assist put it. Sprint (Shift / L3) is a
 toggle, not hold. `wrapAngle`/`angleDelta` keep yaw folded.
 
 ## Multiplayer

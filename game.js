@@ -47,6 +47,7 @@ const G = {
   firstPerson: false,
   paused: false,
   aimAssist: true,          // see padLook() and mouseAssist()
+  recoilScale: 1,           // FN.recoil(scale): multiplier on every kick (0 = none)
   bus: null, mini: null, menuT: 0,
   spec: null,               // entity the camera follows after dying in a lobby match
 };
@@ -75,7 +76,11 @@ function makeEntity(isBot, name, color, skin) {
     slot: 0, kills: 0,
     fireT: 0, reloadT: 0, swingT: 0, useT: 0, useKind: null, useSlot: 0,
     buildMode: false, buildType: 0, buildRot: 0, buildMat: MAT_WOOD, buildT: 0, buildArm: -1, buildKey: null,
-    recoil: 0, hurtT: 0, muzzleT: 0,
+    // recoil (see updateRecoil): applied view offset, its target, the permanent part
+    // still to land, the burst's climb so far, seconds since the last shot, bloom,
+    // and the visual gun / body jolt
+    rp: 0, ry: 0, rpT: 0, ryT: 0, rpPend: 0, rAcc: 0, rT: 9, bloom: 0, gunKick: 0,
+    hurtT: 0, muzzleT: 0,
     // animation
     anim: null, upper: null, xf: new Float32Array(16), animPhase: Math.random() * 3,
     // bot brain
@@ -422,9 +427,8 @@ function tryFire(e, aimX, aimY, aimZ) {
   const gp = gunPoint(e);
   const ox = gp[0], oy = gp[1], oz = gp[2];
   const dmg = weaponDamage(it) * TTK * (e.isBot ? BOT_DMG : 1);
-  // bots are deliberately sloppy — full accuracy at 8 shots/sec is unsurvivable
-  const spread = w.spread * (e === G.player && e.ads ? 0.35 : 1) * (e.isBot ? (7 - e.skill * 4) : 1)
-    * (len2(e.vel[0], e.vel[2]) > 3 ? 1.7 : 1);
+  const spread = shotSpread(e, w);
+  e.gunKick = 1;   // visual only: the gun and the body jolt, springing back over ~0.15 s
   const pellets = w.pellets || 1;
   const col = e === G.player ? [1.0, 0.95, 0.6] : [1.0, 0.55, 0.25];
   for (let p = 0; p < pellets; p++) {
@@ -434,7 +438,7 @@ function tryFire(e, aimX, aimY, aimZ) {
     fireShot(e, ox, oy, oz, dx, dy, dz, dmg, w.range, col);
   }
   if (e === G.player) {
-    e.recoil += w.melee ? 0 : (w.dmg > 80 ? 0.05 : 0.014);
+    addRecoil(e, w);   // bots never kick — their inaccuracy is all spread
     Sfx.shoot(it.id);
   } else if (dist2(e.pos[0], e.pos[2], G.player.pos[0], G.player.pos[2]) < 90 * 90) {
     Sfx.shoot(it.id);
@@ -442,6 +446,89 @@ function tryFire(e, aimX, aimY, aimZ) {
   if (it.mag <= 0) startReload(e);
   return true;
 }
+
+/* --------------------------------- recoil ---------------------------------- */
+
+// The cone the next shot leaves through, radians per axis: the weapon's base
+// spread, a third of it when aiming, up to 1.7x on the move (ramping with speed,
+// full at walking pace) and, for the player, blooming with sustained fire. Bots are
+// deliberately sloppy by skill instead — full accuracy at 8 shots/sec is
+// unsurvivable. The crosshair draws exactly this.
+function shotSpread(e, w) {
+  const speed = len2(e.vel[0], e.vel[2]);
+  if (e.isBot) return w.spread * (7 - e.skill * 4) * (speed > 3 ? 1.7 : 1);
+  let s = w.spread * (e.ads ? 0.35 : 1) * (1 + 0.7 * clamp(speed / WALK_SPEED, 0, 1));
+  const r = w.recoil;
+  if (r && r.bloomMax) s *= 1 + r.bloomMax * e.bloom;
+  return s;
+}
+
+// No profile (pickaxe, a heal in hand): nothing kicks; anything left over settles fast.
+const REC_NONE = { kickT: 0.03, delay: 0, rec: 20 };
+
+// One shot's kick, local player only (profiles: RECOIL in world.js). Nothing moves
+// the view here: the kick goes into a *target* offset (rpT / ryT) that updateRecoil
+// lands over the profile's kickT, so a shot reads as a fast rise rather than a jump.
+// A burst's climb is a pattern that flattens at `max` — rAcc counts it whether or
+// not the player has been pulling down — so held fire settles at a bounded offset
+// instead of walking off the target; the sideways jitter is a capped random walk.
+// `frac` of each kick is recoverable, the rest stays until the player re-aims.
+function addRecoil(e, w) {
+  const r = w.recoil;
+  if (!r) return;
+  const m = (e.ads ? r.ads : 1) * G.recoilScale;
+  const kick = Math.min(Math.max(0, r.max * m - e.rAcc), r.kick * m * (0.9 + 0.2 * Math.random()));
+  e.rAcc += kick;
+  e.rpT += kick * r.frac;
+  e.rpPend += kick * (1 - r.frac);
+  const lim = r.jitMax * m;
+  e.ryT = clamp(e.ryT + rnd(-r.jit, r.jit) * m, -lim, lim);
+  e.bloom = Math.min(1, e.bloom + r.bloom);
+  e.rT = 0;
+}
+
+// Advance the recoil model by dt — time-based, so 30 and 144 fps see the same
+// climb and the same recovery. pitch0 / yaw0 are the view before this frame's look
+// input and aim assist ran:
+//  1. compensation — whatever that input moved the view *against* the offset comes
+//     out of the offset (target and applied alike), not out of the aim. Recovery
+//     then only returns the part the player did not pull down themselves, so it
+//     can never overshoot below where they aimed; the aim assist's pull is treated
+//     the same way instead of stacking with the recovery;
+//  2. after `delay` without a shot the targets shrink toward zero (the burst
+//     pattern and the bloom reset with them);
+//  3. the applied offset (rp / ry — the part of the view that is recoil) chases the
+//     target and the view moves by exactly that much; the permanent part of each
+//     kick drains in through the same filter.
+function updateRecoil(e, dt, pitch0, yaw0) {
+  const w = curWeapon(e);
+  const r = (w && w.recoil) || REC_NONE;
+  let c = opposing(e.pitch - pitch0, e.rpT); e.rpT -= c; e.rp -= c;
+  c = opposing(angleDelta(yaw0, e.yaw), e.ryT); e.ryT -= c; e.ry -= c;
+  e.rT += dt;
+  if (e.rT > r.delay) {
+    const f = Math.exp(-r.rec * dt);
+    e.rpT = settle(e.rpT * f); e.ryT = settle(e.ryT * f); e.rAcc = settle(e.rAcc * f);
+    e.bloom = settle(e.bloom * Math.exp(-6 * dt));
+  }
+  const k = 1 - Math.exp(-dt / r.kickT);
+  const dp = (e.rpT - e.rp) * k, dy = (e.ryT - e.ry) * k, dperm = e.rpPend * k;
+  e.rp += dp; e.ry += dy; e.rpPend -= dperm;
+  e.pitch = clamp(e.pitch + dp + dperm, -1.5, 1.5);
+  e.yaw = wrapAngle(e.yaw + dy);
+  decayKick(e, dt);
+}
+// The part of a look input that pushes against a recoil offset (0 when it agrees
+// with it), signed like the offset so `off -= opposing(...)` moves it toward zero.
+function opposing(input, off) {
+  if (input * off >= 0) return 0;
+  const a = Math.min(input < 0 ? -input : input, off < 0 ? -off : off);
+  return off < 0 ? -a : a;
+}
+function settle(v) { return v > -2e-4 && v < 2e-4 ? 0 : v; }
+// the visual gun / body jolt springs back over ~0.15 s (every entity that fires)
+function decayKick(e, dt) { if (e.gunKick > 0) e.gunKick = e.gunKick < 0.01 ? 0 : e.gunKick * Math.exp(-14 * dt); }
+function gunPunch(it) { const w = it && WEAPONS[it.id]; return w && w.recoil ? w.recoil.punch : 0; }
 
 // Where an entity's held gun sits in the world (muzzle flashes, tracer origin).
 // Tracers from the eye look like they come out of the forehead in third person.
@@ -573,10 +660,11 @@ function updatePlayer(e, dt) {
   // look — yaw is folded back into (-PI, PI] every frame. Left-turning raises it,
   // so leaving it to accumulate meant it grew without bound over a match, and
   // anything downstream doing angle arithmetic on it drifted out of range.
+  const pitch0 = e.pitch, yaw0 = e.yaw;   // updateRecoil tells the player's own look from the kick by these
   e.yaw = wrapAngle(e.yaw - Input.dx);
   e.pitch = clamp(e.pitch - Input.dy, -1.5, 1.5);
   if (Input.padActive) padLook(e, dt); else mouseAssist(e, dt);
-  if (e.recoil > 0) { e.pitch += e.recoil * 0.35; e.recoil *= 0.86; if (e.recoil < 0.001) e.recoil = 0; }
+  updateRecoil(e, dt, pitch0, yaw0);
   updateCamera(e, dt);
 
   const fx = -Math.sin(e.yaw), fz = -Math.cos(e.yaw);
@@ -1665,7 +1753,7 @@ function drawChar(e) {
   // bend the chest toward the aim pitch (and the head a little more)
   if (e.alive && (gun || e.buildMode || e.slot === 0)) {
     const chest = rig.names.chest, head = rig.names.head;
-    const ang = e.pitch * PITCH_K;
+    const ang = (e.pitch + 0.06 * e.gunKick * gunPunch(it)) * PITCH_K;   // a shot rocks the chest back
     if (chest !== undefined) poseRotateLocal(pose, chest, Math.sin(ang * 0.5), 0, 0, Math.cos(ang * 0.5));
     if (head !== undefined) poseRotateLocal(pose, head, Math.sin(ang * 0.25), 0, 0, Math.cos(ang * 0.25));
   }
@@ -1683,11 +1771,13 @@ function drawChar(e) {
     if (hs !== undefined && !e.buildMode && it) {
       m4Mul(_gm, e.xf, a.nodeWorld(hs));
       const grip = GUN_GRIP[it.id] || GUN_GRIP.default;
-      m4YawPitch(_gm3, 0, 0, 0, e.yaw, it.id === 'pickaxe' ? 0 : -e.pitch, 1);
+      // recoil jolt: the muzzle rises and the gun is shoved back along its barrel (+Z in gun space)
+      const punch = e.gunKick * gunPunch(it), back = 0.07 * punch;
+      m4YawPitch(_gm3, 0, 0, 0, e.yaw, it.id === 'pickaxe' ? 0 : -e.pitch - 0.10 * punch, 1);
       const gs = GUN_SCALE;
-      _gm3[12] = _gm[12] - (_gm3[0] * grip[0] + _gm3[4] * grip[1] + _gm3[8] * grip[2]) * gs;
-      _gm3[13] = _gm[13] - (_gm3[1] * grip[0] + _gm3[5] * grip[1] + _gm3[9] * grip[2]) * gs;
-      _gm3[14] = _gm[14] - (_gm3[2] * grip[0] + _gm3[6] * grip[1] + _gm3[10] * grip[2]) * gs;
+      _gm3[12] = _gm[12] - (_gm3[0] * grip[0] + _gm3[4] * grip[1] + _gm3[8] * grip[2]) * gs + _gm3[8] * back;
+      _gm3[13] = _gm[13] - (_gm3[1] * grip[0] + _gm3[5] * grip[1] + _gm3[9] * grip[2]) * gs + _gm3[9] * back;
+      _gm3[14] = _gm[14] - (_gm3[2] * grip[0] + _gm3[6] * grip[1] + _gm3[10] * grip[2]) * gs + _gm3[10] * back;
       drawGunXf(it.id, _gm3, it.id === 'pickaxe' ? COL_GUN_METAL : RARITY[it.rar].col, gs);
       if (e.muzzleT > 0 && gun) {
         const mz = -1.0;   // muzzle along the gun's -Z
@@ -1736,9 +1826,12 @@ function drawFirstPersonGun(p, cam) {
   const d = dirFrom(p.yaw, p.pitch, _av);
   const rx = Math.cos(p.yaw), rz = -Math.sin(p.yaw);
   const ux = -d[1] * d[0], uy = Math.cos(p.pitch), uz = -d[1] * d[2];
-  const kick = p.fireT > 0 ? 0.06 : 0;
-  const x = cam.x + d[0] * (0.55 + kick) + rx * 0.30 - ux * 0.26, y = cam.y + d[1] * (0.55 + kick) - uy * 0.26, z = cam.z + d[2] * (0.55 + kick) + rz * 0.30 - uz * 0.26;
-  drawGun(it.id, x, y, z, p.yaw, -p.pitch, 0.75, it.id === 'pickaxe' ? COL_GUN_METAL : RARITY[it.rar].col);
+  // a shot shoves the gun back along the aim, hops it up and lifts the muzzle; it
+  // springs back as gunKick decays (the aim itself is moved by updateRecoil)
+  const punch = p.gunKick * gunPunch(it);
+  const fwd = 0.55 - 0.06 * punch, up = 0.26 - 0.018 * punch, rise = 0.14 * punch;
+  const x = cam.x + d[0] * fwd + rx * 0.30 - ux * up, y = cam.y + d[1] * fwd - uy * up, z = cam.z + d[2] * fwd + rz * 0.30 - uz * up;
+  drawGun(it.id, x, y, z, p.yaw, -p.pitch - rise, 0.75, it.id === 'pickaxe' ? COL_GUN_METAL : RARITY[it.rar].col);
 }
 
 function drawBus(b) {
@@ -1976,10 +2069,14 @@ function drawCrosshair(W, H) {
     hud.fillRect(W / 2 - 2, H / 2 - 2, 4, 4);
     return;
   }
-  const it = curItem(p);
-  const w = it && WEAPONS[it.id] ? WEAPONS[it.id].spread : 0.02;
-  const move = len2(p.vel[0], p.vel[2]) > 3 ? 1.6 : 1;
-  const spread = clamp(w * 900 * move * (p.ads ? 0.45 : 1), 4, 60);
+  // The gap is the cone the next shot actually leaves through (shotSpread: base,
+  // ADS, movement, bloom) projected through the live FOV, plus the recoil the view
+  // has yet to recover and a pulse on each shot — so it opens on the move, closes
+  // when you aim in, blooms while the trigger is held and settles as the gun does.
+  const w = curWeapon(p);
+  const cone = w ? shotSpread(p, w) : 0.02;
+  const pxr = (H / 2) / Math.tan((p.fov === undefined ? FOV.base : p.fov) / 2);   // virtual px per radian at the centre
+  const spread = clamp(cone * pxr + (Math.abs(p.rpT) + Math.abs(p.ryT)) * pxr * 0.5 + p.gunKick * 5, 4, 90);
   const cx = W / 2, cy = H / 2;
   hud.strokeStyle = 'rgba(255,255,255,.9)'; hud.lineWidth = 2;
   hud.beginPath();
@@ -2285,6 +2382,7 @@ function update(dt) {
       else if (e.alive) updateBot(e, dt);
       if (e.muzzleT > 0) e.muzzleT -= dt;
       if (e.hurtT > 0) e.hurtT -= dt;
+      decayKick(e, dt);
     }
     // spectating: follow someone who is still in it, click to move on
     if (G.spec && !p.alive) {
@@ -2517,6 +2615,7 @@ function boot() {
     assets: () => Assets.report(),
     reload: (name, url) => Assets.load(name, url || 'assets/' + name + '.glb', MANIFEST[name]),
     aimAssist: on => { G.aimAssist = on !== false; },
+    recoil: s => { G.recoilScale = s === undefined ? 1 : +s; },   // kick multiplier: 0 none, 2 double
     shadows: on => { R.shadowsOn = on !== false; },
     // what pad was detected and which slots are live — for diagnosing an odd controller
     pad: () => Input.pad && ({
@@ -2577,7 +2676,9 @@ async function autoRun(q) {
     if (q.get('place')) { p.buildMode = true; for (let i = 0; i < num('place', 1); i++) { p.buildT = 0; tryBuild(p); update(0.05); } }
     updateCamera(p, 1);
     p.camDist = undefined; updateCamera(p, 1);
-    if (q.get('fire')) { const aim = playerAimDir(p); p.fireT = 0; tryFire(p, aim[0], aim[1], aim[2]); update(0.016); }
+    if (q.get('fire')) {   // fire=N holds the trigger for N shots, so recoil, bloom and the gun kick build up
+      for (let i = 0; i < num('fire', 1); i++) { const aim = playerAimDir(p); p.fireT = 0; tryFire(p, aim[0], aim[1], aim[2]); update(0.016); }
+    }
     if (q.has('side')) {    // look at the player from the right, for weapon checks
       const d = num('side', 3), rx = Math.cos(p.yaw), rz = -Math.sin(p.yaw);
       G.debugCam = { x: p.pos[0] + rx * d, y: p.pos[1] + 1.3, z: p.pos[2] + rz * d, yaw: wrapAngle(p.yaw + Math.PI / 2), pitch: -0.05 };

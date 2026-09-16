@@ -342,7 +342,7 @@ const Net = {
     e.slot = d.sl | 0;
     e.buildMode = !!d.bm; e.ads = !!d.ads;
     if (d.up && d.up[0] !== e.upSeen) { e.upSeen = d.up[0]; playUpper(e, d.up[1], d.up[2]); }
-    if (d.mz) e.muzzleT = 0.06;
+    if (d.mz) { e.muzzleT = 0.06; e.gunKick = 1; }   // muzzle flash + the third-person jolt
   },
 
   // Place a remote entity a little behind real time, between the two poses that

@@ -5,6 +5,7 @@ Tools that are not part of the game.
 | File | What |
 | --- | --- |
 | `test.js` | Headless building / collision suite. `node dev/test.js` — loads the real engine, world and game code with a stubbed DOM and checks walls block at every frame rate, walls built through you push you out, falls land on floors, ramp decks are solid from below, cones are walkable, placement lands next to you, staircases chain, structures collapse when their base goes, and hillside placement works. |
+| `recoiltest.js` | Headless gunplay suite. `node dev/recoiltest.js` — drives the real `updatePlayer` with the trigger held on every gun at 30 / 60 / 144 fps and checks the peak climb per weapon, that it is identical at every frame rate, recovery to the original aim within the target time, that pulling down during a burst is respected (never undone or overshot by the recovery), that the mouse aim assist neither fights nor amplifies the kick, spread / bloom, and that bots never kick. Prints the measured numbers. |
 | `nettest.js` | Relay server test. Spawns `server.js` on a spare port and drives it with Node's built-in WebSocket client: lobby codes, joining, `host` / `all` / id routing, a fragmented 200 KB frame, the mid-match lock, host migration. |
 | `mptest.js` | Headless multiplayer match. Loads the whole game twice (host and client, separate VM contexts) through an in-memory relay: identical worlds from one seed, poses both ways, a client hit on the host's health, a client build, pickup, chest, drop, elimination, spectate, end. |
 | `browsertest.js` | Two real headless Chrome pages through the live server over the DevTools protocol — needs `node server.js` running and Chrome (`CHROME=` to point at it). |
@@ -32,6 +33,6 @@ chrome --headless=new --disable-gpu --use-angle=swiftshader --enable-unsafe-swif
 | `give=ar&rar=3` `mats=500` | loadout |
 | `bots=N&bdist=7` | park N armed bots in front, facing you |
 | `build=2&place=1` | build mode with that piece, place it N times |
-| `fp=1` `ads=1` `fire=1` `walk=1` | first person, aim, fire once, hold W during the sim steps |
+| `fp=1` `ads=1` `fire=N` `walk=1` | first person, aim, hold the trigger for N shots (recoil, bloom and the gun kick build up), hold W during the sim steps |
 | `front=3` / `side=3` | look at the player from in front / from the right |
 | `steps=30` | simulation steps (1/30 s each) before the frame |
