@@ -277,6 +277,8 @@ function makeTube(seg) {
 const MESH_CUBE = 0, MESH_RAMP = 1, MESH_CONE = 2, MESH_CYL = 3, MESH_SPHERE = 4, MESH_TUBE = 5, MESH_COUNT = 6;
 const INST_STRIDE = 20; // mat4 (16) + rgba (4)
 const MAX_JOINTS = 64;
+const FOLIAGE_MIX = 0.55;      // how far a leaf card's normal leans toward "up" (see FS_MAIN)
+const ZERO3 = new Float32Array(3);
 const SHADOW_SIZE = 2048;
 const SHADOW_HALF = 62;        // metres each side of the shadow box centre
 
@@ -388,8 +390,13 @@ vec3 fogged(vec3 col) {
   return tonemap(mix(col, fogCol, f * 0.93));
 }`;
 
+// uTexMode 1 = a glTF part: UV-mapped, alpha-tested at uCutoff (leaf cards),
+// lit on both sides (the normal is flipped on back faces), uFoliage softens the
+// normal toward "up" so a canopy reads as one volume, uEmis adds unlit light
+// (brake lights, lanterns). Mode 2 = triplanar material, 0 = flat colour.
 const FS_MAIN = FS_LIT_HEAD + `
 uniform sampler2D uTex; uniform float uTexMode; uniform float uTexScale; uniform vec4 uBase; uniform float uCutoff;
+uniform vec3 uEmis; uniform float uFoliage;
 
 vec3 triplanar(vec3 wp, vec3 n) {
   vec3 an = abs(n);
@@ -401,8 +408,12 @@ void main(){
   vec3 n = normalize(vN);
   vec4 albedo = vC * uBase;
   if (uTexMode > 1.5) albedo.rgb *= triplanar(vWP, n);
-  else if (uTexMode > 0.5) { vec4 t = texture(uTex, vUV); if (t.a < uCutoff) discard; albedo *= t; }
-  vec3 col = (albedo.a < 0.999) ? albedo.rgb * 1.15 : shade(albedo.rgb, n, uSpec);
+  else if (uTexMode > 0.5) {
+    vec4 t = texture(uTex, vUV); if (t.a < uCutoff) discard; albedo *= t;
+    if (!gl_FrontFacing) n = -n;
+    if (uFoliage > 0.0) n = normalize(mix(n, vec3(0.0, 1.0, 0.0), uFoliage));
+  }
+  vec3 col = (albedo.a < 0.999) ? albedo.rgb * 1.15 : shade(albedo.rgb, n, uSpec) + uEmis;
   outColor = vec4(fogged(col), albedo.a);
 }`;
 
@@ -474,11 +485,23 @@ void main(){
   outColor = vec4(tonemap(col), 1.0);
 }`;
 
+// The cutout variant (USE_UV) carries the UV through so leaf cards cast leaf-shaped
+// shadows instead of quad-shaped ones.
 const VS_DEPTH_INST = `
 layout(location=0) in vec3 aPos;
 layout(location=2) in mat4 aModel;
+#ifdef USE_UV
+layout(location=7) in vec2 aUV;
+out vec2 vUV;
+#endif
 uniform mat4 uVP;
-void main(){ gl_Position = uVP * aModel * vec4(aPos, 1.0); }`;
+void main(){
+#ifdef USE_UV
+  vUV = aUV;
+#endif
+  gl_Position = uVP * aModel * vec4(aPos, 1.0);
+}`;
+const FS_DEPTH_CUT = `precision mediump float; in vec2 vUV; uniform sampler2D uTex; void main(){ if (texture(uTex, vUV).a < 0.5) discard; }`;
 const VS_DEPTH_SKIN = `
 layout(location=0) in vec3 aPos;
 layout(location=8) in vec4 aJoints;
@@ -658,9 +681,10 @@ class Renderer {
     this.progTerrain = this._program(VS_INST, FS_TERRAIN, '');
     this.progSky = this._program(VS_SKY, FS_SKY, '');
     this.progDepth = this._program(VS_DEPTH_INST, FS_DEPTH, '');
+    this.progDepthCut = this._program(VS_DEPTH_INST, FS_DEPTH_CUT, '#define USE_UV\n');
     this.progDepthSkin = this._program(VS_DEPTH_SKIN, FS_DEPTH, '');
     const units = { uTex: 0, uShadow: 1, uGrass: 2, uRock: 3, uDirt: 4, uNoise: 5, uSplat: 6 };
-    for (const P of [this.progFlat, this.progTex, this.progSkin, this.progTerrain, this.progSky]) {
+    for (const P of [this.progFlat, this.progTex, this.progSkin, this.progTerrain, this.progSky, this.progDepthCut]) {
       gl.useProgram(P.p);
       for (const k in units) if (P.u[k] !== undefined) gl.uniform1i(P.u[k], units[k]);
     }
@@ -772,9 +796,17 @@ class Renderer {
   // Textures are uploaded verbatim, no sRGB decode: the rest of the game authors
   // colour as final output, and decoding only these would leave props darker than
   // everything they stand next to.
-  _texture(image, wrapS, wrapT) {
+  // `key` (the image's URL, from models.js) shares one GPU texture between every
+  // part that samples the same external file — a bark texture used by five tree
+  // models is uploaded once.
+  _texture(image, wrapS, wrapT, key) {
     if (!image) return null;
-    return this.texture(image, { wrapS: wrapS || undefined, wrapT: wrapT || undefined });
+    const k = key ? key + '|' + (wrapS || 0) + '|' + (wrapT || 0) : null;
+    const cache = this._texCache || (this._texCache = new Map());
+    if (k && cache.has(k)) { if (image.close) image.close(); return cache.get(k); }
+    const t = this.texture(image, { wrapS: wrapS || undefined, wrapT: wrapT || undefined });
+    if (k) cache.set(k, t);
+    return t;
   }
 
   setTerrainTextures(t) { Object.assign(this.tex, t); }
@@ -1108,8 +1140,9 @@ class Renderer {
       tris += p.idx.length / 3;
       parts.push({
         vao, vbo, ibo, ebo, cap: 0, count: p.idx.length,
-        tex: this._texture(p.image, p.wrapS, p.wrapT),
+        tex: this._texture(p.image, p.wrapS, p.wrapT, p.imageKey),
         base: new Float32Array(p.color),
+        cutout: !!p.cutout, emis: p.emissive || null, foliage: p.foliage ? FOLIAGE_MIX : 0,
         opaque: growable(64), blend: growable(16),
       });
     }
@@ -1148,7 +1181,7 @@ class Renderer {
       gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, p.idx, gl.STATIC_DRAW);
       gl.bindVertexArray(null);
       tris += p.idx.length / 3;
-      parts.push({ vao, vbo, ebo, count: p.idx.length, tex: this._texture(p.image, p.wrapS, p.wrapT), base: new Float32Array(p.color) });
+      parts.push({ vao, vbo, ebo, count: p.idx.length, tex: this._texture(p.image, p.wrapS, p.wrapT, p.imageKey), base: new Float32Array(p.color), cutout: !!p.cutout, emis: p.emissive || null, foliage: p.foliage ? FOLIAGE_MIX : 0 });
     }
     const min = cpu.min, max = cpu.max;
     const model = {
@@ -1387,6 +1420,8 @@ class Renderer {
         if (u.uBase) {
           gl.uniform4fv(u.uBase, p.base);
           gl.uniform1f(u.uTexMode, p.tex ? 1 : 0);
+          gl.uniform1f(u.uFoliage, p.foliage || 0);
+          gl.uniform3fv(u.uEmis, p.emis || ZERO3);
           gl.activeTexture(gl.TEXTURE0);
           gl.bindTexture(gl.TEXTURE_2D, p.tex || this.whiteTex);
         }
@@ -1415,7 +1450,14 @@ class Renderer {
       gl.uniformMatrix4fv(this.progDepth.u.uVP, false, this.lightVP);
       for (let i = 0; i < this.meshes.length; i++) if (counts[i]) this._drawMesh(this.meshes[i], counts[i]);
       for (const m of this.terrainList) if (m.oc) this._drawMesh(m, m.oc);
-      for (const model of this.models) if (!model.skinned) for (const p of model.parts) if (p.oc) this._drawPart(p, p.oc);
+      let cut = 0;
+      for (const model of this.models) if (!model.skinned) for (const p of model.parts) if (p.oc) { if (p.cutout) cut++; else this._drawPart(p, p.oc); }
+      if (cut) {   // alpha-tested parts (leaves) go through the sampling depth program
+        gl.useProgram(this.progDepthCut.p);
+        gl.uniformMatrix4fv(this.progDepthCut.u.uVP, false, this.lightVP);
+        gl.activeTexture(gl.TEXTURE0);
+        for (const model of this.models) if (!model.skinned) for (const p of model.parts) if (p.oc && p.cutout) { gl.bindTexture(gl.TEXTURE_2D, p.tex); this._drawPart(p, p.oc); }
+      }
       if (this.skinCount) {
         gl.useProgram(this.progDepthSkin.p);
         gl.uniformMatrix4fv(this.progDepthSkin.u.uVP, false, this.lightVP);
@@ -1509,7 +1551,7 @@ class Renderer {
 
   _drawModels(blendPass) {
     const gl = this.gl, P = this.progTex, u = P.u;
-    let bound = false;
+    let bound = false, cutoff = -1, foliage = -1, emis = null;
     for (const model of this.models) {
       if (model.skinned) continue;
       for (const p of model.parts) {
@@ -1517,10 +1559,14 @@ class Renderer {
         if (!bound) {
           this._common(P, this.vp);
           gl.uniform1f(u.uTexMode, 1);
-          gl.uniform1f(u.uCutoff, blendPass ? 0 : 0.5);
           gl.activeTexture(gl.TEXTURE0);
           bound = true;
         }
+        // per-part material state, only re-sent when it changes
+        const c = blendPass ? 0 : (p.cutout ? 0.5 : 0);
+        if (c !== cutoff) { gl.uniform1f(u.uCutoff, c); cutoff = c; }
+        if (p.foliage !== foliage) { gl.uniform1f(u.uFoliage, p.foliage); foliage = p.foliage; }
+        if (p.emis !== emis) { gl.uniform3fv(u.uEmis, p.emis || ZERO3); emis = p.emis; }
         gl.uniform4fv(u.uBase, p.base);
         gl.bindTexture(gl.TEXTURE_2D, p.tex || this.whiteTex);
         this._drawPart(p, p.oc);

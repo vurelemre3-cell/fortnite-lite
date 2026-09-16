@@ -538,38 +538,67 @@ function damagePiece(p, dmg, harvest) {
 // A solid prop gets a collider (so it blocks, shields and can be harvested); a
 // decorative one is just drawn.
 
+// `maxR` caps the collider taken from the model's footprint — a tree blocks at its
+// trunk, not at the edge of its canopy. `weights` biases the random variant pick
+// (lighter tree meshes are drawn more often: 1500 of them are on the map).
 const PROP_DEF = {
-  tree: { models: ['tree_a', 'tree_b', 'tree_pine_y', 'tree_pine_o'], h: [8.6, 9.4, 11, 10], rx: 0.6, mat: MAT_WOOD, hp: 100, rot: 'any', cull: 5 },
-  rock: { models: ['rock_c', 'rock_d', 'rock_e', 'rock_space'], h: [2.0, 1.6, 2.2, 2.0], rx: 1.4, mat: MAT_BRICK, hp: 130, rot: 'any' },
-  car: { models: ['car_sedan', 'car_hatchback', 'car_police', 'car_taxi', 'car_wagon'], h: 1.9, rx: 1.0, rz: 2.2, mat: MAT_METAL, hp: 170, rot: 'any' },
-  bush: { models: ['bush'], h: [1.3], rx: 0.7, mat: MAT_WOOD, hp: 20, solid: false, rot: 'any' },
+  // Quaternius Ultimate Stylized Nature (textured bark, alpha-cutout leaves)
+  tree: {
+    models: ['tree_pine_1', 'tree_pine_2', 'tree_pine_4', 'tree_pine_5', 'tree_birch_1', 'tree_birch_4', 'tree_birch_5', 'tree_maple_1', 'tree_maple_4', 'tree_maple_5', 'tree_oak_3', 'tree_oak_5'],
+    h: [9.5, 12, 9, 8.5, 10, 8, 10.5, 9, 7, 10, 9, 7],
+    weights: [3, 2, 2, 3, 2, 3, 1, 1, 3, 1, 1, 2],
+    rx: 0.55, maxR: 0.55, mat: MAT_WOOD, hp: 100, rot: 'any', cull: 6,
+  },
+  tree_dead: { models: ['tree_dead_1', 'tree_dead_3', 'tree_dead_5', 'tree_dead_9'], h: [8.0, 7.0, 4.0, 4.5], rx: 0.5, maxR: 0.5, mat: MAT_WOOD, hp: 80, rot: 'any', cull: 5 },
+  rock: { models: ['rock_1', 'rock_2', 'rock_3', 'rock_4', 'rock_5'], h: [1.6, 1.9, 2.3, 3.0, 2.5], rx: 1.2, mat: MAT_BRICK, hp: 130, rot: 'any' },
+  bush: { models: ['bush_1', 'bush_2', 'bush_3', 'bush_4', 'bush_5'], h: [1.3, 1.5, 1.2, 1.3, 1.5], rx: 0.7, mat: MAT_WOOD, hp: 20, solid: false, rot: 'any' },
+  grass: { models: ['grass_1', 'grass_2', 'plant_1', 'plant_2', 'plant_3'], h: [0.55, 0.45, 0.5, 0.5, 1.0], rx: 0.5, mat: MAT_WOOD, hp: 5, solid: false, rot: 'any', cull: 1.5 },
   log: { models: ['log_large', 'log_medium'], h: [1.1, 0.9], rx: 0.6, rz: 1.6, mat: MAT_WOOD, hp: 80, rot: 'any' },
-  streetlight: { models: ['streetlight'], h: 5.2, rx: 0.3, mat: MAT_METAL, hp: 60 },
+  // Quaternius Zombie Apocalypse Kit — vehicles and street furniture
+  car: { models: ['car_pickup', 'car_sports', 'car_truck', 'car_pickup_armored', 'car_sports_armored', 'car_truck_armored'], h: [1.8, 1.9, 2.9, 2.0, 2.0, 2.9], rx: 1.2, rz: 2.6, mat: MAT_METAL, hp: 170, rot: 'any' },
+  streetlight: { models: ['streetlight_z'], h: 6.6, rx: 0.3, maxR: 0.35, mat: MAT_METAL, hp: 60 },
+  trafficlight: { models: ['trafficlight_1', 'trafficlight_2'], h: [4.7, 4.7], rx: 0.3, maxR: 0.4, mat: MAT_METAL, hp: 60 },
+  hydrant: { models: ['hydrant_z'], h: 0.8, rx: 0.25, mat: MAT_METAL, hp: 40 },
+  trash: { models: ['trash_a', 'trash_b', 'trashbag_1', 'trashbag_2'], h: [1.1, 1.1, 0.6, 0.5], rx: 0.35, mat: MAT_METAL, hp: 30 },
+  cone: { models: ['cone_1', 'cone_2'], h: 0.7, rx: 0.3, mat: MAT_METAL, hp: 15, rot: 'any' },
+  barrier: { models: ['barrier_1', 'barrier_2', 'barrier_plastic'], h: [1.1, 0.8, 0.6], rx: 0.8, rz: 0.4, mat: MAT_WOOD, hp: 40 },
+  container_z: { models: ['container_green', 'container_red'], h: 2.6, rx: 1.3, rz: 2.9, mat: MAT_METAL, hp: 300 },
+  watertower: { models: ['watertower_z'], h: 11, rx: 1.6, mat: MAT_METAL, hp: 400 },
+  townsign: { models: ['townsign'], h: 5.5, rx: 3.0, rz: 0.9, mat: MAT_METAL, hp: 120 },
+  wheels: { models: ['wheels_stack'], h: 0.6, rx: 0.4, mat: MAT_METAL, hp: 30, rot: 'any' },
+  pipes: { models: ['pipes'], h: 0.7, rx: 0.4, rz: 1.7, mat: MAT_METAL, hp: 60, rot: 'any' },
+  drum: { models: ['barrel_z'], h: 1.1, rx: 0.4, mat: MAT_METAL, hp: 45 },
+  couch_z: { models: ['couch_z'], h: 1.2, rx: 1.5, rz: 0.6, mat: MAT_WOOD, hp: 50 },
+  // KayKit street / farm / camp props
   bench: { models: ['bench'], h: 0.9, rx: 1.0, rz: 0.4, mat: MAT_WOOD, hp: 50 },
   dumpster: { models: ['dumpster'], h: 1.5, rx: 1.0, rz: 0.7, mat: MAT_METAL, hp: 120 },
-  hydrant: { models: ['hydrant'], h: 0.9, rx: 0.25, mat: MAT_METAL, hp: 40 },
-  trash: { models: ['trash_a', 'trash_b'], h: 1.1, rx: 0.35, mat: MAT_METAL, hp: 30 },
-  trafficlight: { models: ['trafficlight'], h: 5.0, rx: 0.3, mat: MAT_METAL, hp: 60 },
-  watertower: { models: ['watertower'], h: 14, rx: 2.6, mat: MAT_METAL, hp: 400 },
   box: { models: ['box_a', 'box_b', 'crate_big', 'crates_stacked', 'crate_small'], h: [1.0, 1.0, 1.4, 1.9, 0.8], rx: 0.6, mat: MAT_WOOD, hp: 45 },
   barrel: { models: ['barrel', 'barrel_large', 'keg', 'barrel_stack'], h: [1.1, 1.3, 1.0, 1.5], rx: 0.5, mat: MAT_WOOD, hp: 45 },
   fence: { models: ['fence_wood'], h: 1.2, rx: 1.7, rz: 0.15, mat: MAT_WOOD, hp: 40 },
   fence_iron: { models: ['fence_iron', 'fence_gate'], h: 1.5, rx: 1.7, rz: 0.15, mat: MAT_METAL, hp: 60 },
   tent: { models: ['tent'], h: 2.6, rx: 1.9, rz: 1.9, mat: MAT_WOOD, hp: 60 },
   wheelbarrow: { models: ['wheelbarrow'], h: 1.0, rx: 0.5, rz: 0.9, mat: MAT_METAL, hp: 40 },
-  pallet: { models: ['pallet'], h: 0.35, rx: 0.9, mat: MAT_WOOD, hp: 30, solid: false },
+  pallet: { models: ['pallet', 'pallet_z', 'pallet_broken'], h: [0.35, 0.15, 0.2], rx: 0.9, mat: MAT_WOOD, hp: 30, solid: false },
   sack: { models: ['sack'], h: 0.8, rx: 0.4, mat: MAT_WOOD, hp: 25 },
   lumber: { models: ['lumber'], h: 1.1, rx: 0.9, rz: 0.6, mat: MAT_WOOD, hp: 70 },
   stone: { models: ['stone'], h: 1.3, rx: 0.9, mat: MAT_BRICK, hp: 90 },
+  // the space base: KayKit containers / cargo / turbine / pad + Quaternius Ultimate Space Kit
   container: { models: ['container_a', 'container_b'], h: 3.0, rx: 1.5, rz: 3.4, mat: MAT_METAL, hp: 300 },
   cargo: { models: ['cargo'], h: 2.3, rx: 1.3, mat: MAT_METAL, hp: 150 },
-  lander: { models: ['lander'], h: 7.0, rx: 3.2, mat: MAT_METAL, hp: 400 },
+  crate: { models: ['pickup_crate'], h: 0.9, rx: 0.45, mat: MAT_METAL, hp: 50 },
+  ship: { models: ['ship_bee', 'ship_frog', 'ship_panda'], h: [4.8, 3.2, 2.6], rx: 3.5, rz: 3.5, mat: MAT_METAL, hp: 400, rot: 'any' },
+  rover: { models: ['rover_1', 'rover_2', 'rover_round'], h: [3.2, 3.2, 3.5], rx: 1.5, rz: 2.4, mat: MAT_METAL, hp: 250, rot: 'any' },
+  dome: { models: ['dome', 'base_large'], h: [5.3, 5.0], rx: 4.2, mat: MAT_METAL, hp: 600 },
+  spacehouse: { models: ['house_single', 'house_long', 'house_cylinder'], h: [4.0, 4.3, 4.3], rx: 2.0, rz: 2.0, mat: MAT_METAL, hp: 500 },
   turbine: { models: ['turbine'], h: 24, rx: 1.0, mat: MAT_METAL, hp: 500 },
-  solar: { models: ['solar'], h: 2.4, rx: 1.7, rz: 1.1, mat: MAT_METAL, hp: 80 },
-  spacetruck: { models: ['spacetruck'], h: 3.4, rx: 1.7, rz: 3.4, mat: MAT_METAL, hp: 250, rot: 'any' },
+  solar: { models: ['solar_ground', 'solar_structure'], h: [1.1, 3.1], rx: 0.7, rz: 0.9, mat: MAT_METAL, hp: 80 },
+  radar: { models: ['radar'], h: 3.5, rx: 0.8, mat: MAT_METAL, hp: 80 },
+  support: { models: ['metal_support'], h: 1.2, rx: 0.1, rz: 3.0, mat: MAT_METAL, hp: 120 },
+  alien: { models: ['alien_blob', 'alien_spikes', 'alien_spiral', 'alien_swirl'], h: [5.0, 4.5, 4.0, 6.0], rx: 0.5, maxR: 0.5, mat: MAT_WOOD, hp: 60, rot: 'any' },
+  srock: { models: ['srock_1', 'srock_2', 'srock_large_1', 'srock_large_2', 'srock_large_3'], h: [3.4, 2.6, 3.2, 7.5, 6.5], rx: 1.5, mat: MAT_BRICK, hp: 200, rot: 'any' },
   landingpad: { models: ['landingpad'], h: 0.45, rx: 5, mat: MAT_METAL, hp: 300, solid: false },
+  // the graveyard (KayKit Halloween)
   grave: { models: ['grave_a', 'grave_b', 'gravestone'], h: [1.4, 1.2, 1.0], rx: 0.5, mat: MAT_BRICK, hp: 60 },
-  tree_dead: { models: ['tree_dead', 'tree_dead_m'], h: [8.0, 5.8], rx: 0.5, mat: MAT_WOOD, hp: 80, rot: 'any' },
   crypt: { models: ['crypt'], h: 5.8, rx: 3.0, rz: 3.6, mat: MAT_BRICK, hp: 500 },
   lantern: { models: ['lantern', 'post_lantern'], h: [1.3, 3.4], rx: 0.25, mat: MAT_METAL, hp: 30 },
   pumpkin: { models: ['pumpkin'], h: 0.65, rx: 0.4, mat: MAT_WOOD, hp: 15 },
@@ -591,6 +620,7 @@ function propFootprint(def, model, h, rot) {
   if (m && m.h > 0) {
     const s = h / m.h;
     rx = Math.max(0.2, m.w * s / 2); rz = Math.max(0.2, m.d * s / 2);
+    if (def.maxR) { rx = Math.min(rx, def.maxR); rz = Math.min(rz, def.maxR); }   // trunk, not canopy
   }
   // a rotated box is approximated by a square that covers it
   const q = Math.round(rot / (Math.PI / 2)) * (Math.PI / 2);
@@ -599,11 +629,22 @@ function propFootprint(def, model, h, rot) {
   return [rx, rz];
 }
 
+// Random variant index, honouring the kind's `weights` when it has them.
+function pickVariant(def) {
+  const w = def.weights;
+  if (!w) return (Math.random() * def.models.length) | 0;
+  let total = 0;
+  for (let i = 0; i < w.length; i++) total += w[i];
+  let r = Math.random() * total;
+  for (let i = 0; i < w.length; i++) { r -= w[i]; if (r < 0) return i; }
+  return w.length - 1;
+}
+
 function addProp(kind, x, z, opts) {
   const def = PROP_DEF[kind];
   if (!def) return null;
   const o = opts || {};
-  const vi = o.variant !== undefined ? o.variant : (Math.random() * def.models.length) | 0;
+  const vi = o.variant !== undefined ? o.variant : pickVariant(def);
   const model = def.models[vi];
   const h = (Array.isArray(def.h) ? def.h[vi] : def.h) * (o.scale || 1);
   const rot = o.rot !== undefined ? o.rot : (def.rot === 'any' ? rnd(0, Math.PI * 2) : 0);
@@ -823,15 +864,23 @@ function buildPOI(poi) {
   if (th === 'town') {
     const houses = 4 + ((Math.random() * 3) | 0);
     for (let h = 0; h < houses; h++) placeHouse(px, pz, gy0, Math.random() < 0.6 ? MAT_BRICK : MAT_WOOD, Math.random() < 0.5 ? 2 : 1);
-    for (let c = 0; c < 4; c++) scatterProp('car', px, pz, 36, { onRoad: true, gap: 2.5 });
-    for (let c = 0; c < 6; c++) scatterProp('streetlight', px, pz, 30, { ring: true, onRoad: true, gap: 1 });
+    for (let c = 0; c < 5; c++) scatterProp('car', px, pz, 36, { onRoad: true, gap: 2.8 });
+    for (let c = 0; c < 6; c++) scatterProp('streetlight', px, pz, 30, { ring: true, onRoad: true, gap: 1, rot: pick([0, Math.PI / 2, Math.PI, -Math.PI / 2]) });
     for (let c = 0; c < 3; c++) scatterProp('bench', px, pz, 26, { onRoad: true, rot: pick([0, Math.PI / 2]) });
     for (let c = 0; c < 2; c++) scatterProp('dumpster', px, pz, 30, { onRoad: true, rot: pick([0, Math.PI / 2]) });
     for (let c = 0; c < 3; c++) scatterProp('hydrant', px, pz, 30, { onRoad: true, gap: 0.8 });
-    for (let c = 0; c < 4; c++) scatterProp('trash', px, pz, 30, { onRoad: true, gap: 0.8 });
+    for (let c = 0; c < 5; c++) scatterProp('trash', px, pz, 30, { onRoad: true, gap: 0.8 });
     for (let c = 0; c < 3; c++) scatterProp('box', px, pz, 32, { onRoad: true });
-    if (Math.random() < 0.6) scatterProp('watertower', px, pz, 34, { ring: true, gap: 4 });
-    scatterProp('trafficlight', px, pz, 12, { onRoad: true, gap: 1 });
+    for (let c = 0; c < 4; c++) scatterProp('cone', px, pz, 30, { onRoad: true, gap: 0.6 });
+    for (let c = 0; c < 3; c++) scatterProp('barrier', px, pz, 30, { onRoad: true, gap: 1, rot: pick([0, Math.PI / 2]) });
+    for (let c = 0; c < 2; c++) scatterProp('container_z', px, pz, 34, { gap: 3, rot: pick([0, Math.PI / 2]) });
+    for (let c = 0; c < 3; c++) scatterProp('drum', px, pz, 30, { onRoad: true, gap: 0.8 });
+    for (let c = 0; c < 2; c++) scatterProp('wheels', px, pz, 30, { onRoad: true, gap: 0.8 });
+    scatterProp('pipes', px, pz, 30, { gap: 2 });
+    scatterProp('couch_z', px, pz, 28, { onRoad: true, gap: 1.5, rot: rnd(0, 6.3) });
+    scatterProp('townsign', px, pz, 30, { ring: true, onRoad: true, gap: 3, rot: pick([0, Math.PI / 2]) });
+    if (Math.random() < 0.7) scatterProp('watertower', px, pz, 34, { ring: true, gap: 4 });
+    for (let c = 0; c < 2; c++) scatterProp('trafficlight', px, pz, 14, { onRoad: true, gap: 1, rot: pick([0, Math.PI / 2, Math.PI, -Math.PI / 2]) });
     chests(3); loot(8);
   } else if (th === 'farm') {
     for (let h = 0; h < 3; h++) placeHouse(px, pz, gy0, MAT_WOOD, Math.random() < 0.35 ? 2 : 1);
@@ -850,14 +899,19 @@ function buildPOI(poi) {
   } else if (th === 'spacebase') {
     for (let h = 0; h < 2; h++) placeHouse(px, pz, gy0, MAT_METAL, 1);
     scatterProp('landingpad', px, pz, 10, { onRoad: true, gap: 6 });
-    scatterProp('lander', px, pz, 12, { onRoad: true, gap: 4, rot: rnd(0, 6.3) });
-    for (let c = 0; c < 6; c++) scatterProp('container', px, pz, 34, { rot: pick([0, Math.PI / 2]), gap: 3 });
+    scatterProp('ship', px, pz, 12, { onRoad: true, gap: 5, rot: rnd(0, 6.3) });
+    scatterProp('dome', px, pz, 30, { gap: 5 });
+    for (let c = 0; c < 3; c++) scatterProp('spacehouse', px, pz, 32, { rot: pick([0, Math.PI / 2, Math.PI, -Math.PI / 2]), gap: 4 });
+    for (let c = 0; c < 5; c++) scatterProp('container', px, pz, 34, { rot: pick([0, Math.PI / 2]), gap: 3 });
     for (let c = 0; c < 4; c++) scatterProp('cargo', px, pz, 32, { rot: pick([0, Math.PI / 2]), gap: 1.5 });
     for (let c = 0; c < 2; c++) scatterProp('turbine', px, pz, 38, { ring: true, gap: 2 });
-    for (let c = 0; c < 4; c++) scatterProp('solar', px, pz, 34, { rot: pick([0, Math.PI / 2]), gap: 2 });
-    for (let c = 0; c < 2; c++) scatterProp('spacetruck', px, pz, 32, { gap: 3 });
-    for (let c = 0; c < 4; c++) scatterProp('rock', px, pz, 36, { variant: 3, ring: true });
-    for (let c = 0; c < 3; c++) scatterProp('box', px, pz, 30, { variant: 1 });
+    for (let c = 0; c < 5; c++) scatterProp('solar', px, pz, 34, { rot: pick([0, Math.PI / 2]), gap: 2 });
+    for (let c = 0; c < 2; c++) scatterProp('radar', px, pz, 30, { gap: 1.5 });
+    for (let c = 0; c < 3; c++) scatterProp('rover', px, pz, 32, { onRoad: true, gap: 3 });
+    for (let c = 0; c < 2; c++) scatterProp('support', px, pz, 30, { rot: pick([0, Math.PI / 2]), gap: 1 });
+    for (let c = 0; c < 5; c++) scatterProp('srock', px, pz, 38, { ring: true, gap: 3 });
+    for (let c = 0; c < 7; c++) scatterProp('alien', px, pz, 36, { ring: true, gap: 2 });
+    for (let c = 0; c < 4; c++) scatterProp('crate', px, pz, 30, { gap: 0.8 });
     chests(4); loot(8);
   } else if (th === 'graveyard') {
     placeHouse(px, pz, gy0, MAT_BRICK, 1);
@@ -923,12 +977,18 @@ function generateWorld() {
   for (let i = 0; i < 1500; i++) {
     const x = rnd(-HALF + 6, HALF - 6), z = rnd(-HALF + 6, HALF - 6);
     if (!farFromPOI(x, z, 34) || nearRoad(x, z, 6)) continue;
-    addProp('tree', x, z, { variant: Math.random() < 0.82 ? ((Math.random() * 2) | 0) : 2 + ((Math.random() * 2) | 0) });
+    addProp('tree', x, z, {});
   }
   for (let i = 0; i < 520; i++) {
     const x = rnd(-HALF + 6, HALF - 6), z = rnd(-HALF + 6, HALF - 6);
     if (nearRoad(x, z, 5)) continue;
-    addProp('rock', x, z, { variant: (Math.random() * 3) | 0 });
+    addProp('rock', x, z, { scale: rnd(0.7, 1.3) });
+  }
+  // ground cover: grass tufts and flowering plants, decoration only, drawn up close
+  for (let i = 0; i < 2200; i++) {
+    const x = rnd(-HALF + 6, HALF - 6), z = rnd(-HALF + 6, HALF - 6);
+    if (nearRoad(x, z, 4)) continue;
+    addProp('grass', x, z, { scale: rnd(0.8, 1.5) });
   }
   for (let i = 0; i < 700; i++) {
     const x = rnd(-HALF + 6, HALF - 6), z = rnd(-HALF + 6, HALF - 6);

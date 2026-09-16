@@ -1454,6 +1454,45 @@ const CHAR_HEIGHT = 2.05;   // drawn height in metres (the collider stays ENT_H)
 // what reads correctly. GRIP is where the hand sits in gun space.
 const GUN_SCALE = 0.9;
 const GUN_GRIP = { pickaxe: [0, -0.35, 0], pistol: [0, -0.14, 0.12], default: [0, -0.12, 0.16] };
+
+// Real weapon models (Quaternius Zombie Apocalypse Kit) take over from the
+// procedural assemblies in GUN_MODEL as soon as they load. The models point their
+// muzzle down +Z with the origin at the grip; `pre` maps model axes into gun
+// space (barrel along -Z; the fire axe is stood up like the pickaxe), `k` scales
+// model units to metres, `grip` is where the hand sits and `muzzle` the barrel
+// tip, both in model units. The sniper is the rifle drawn longer with a
+// procedural scope on top (`extra`, same part format as GUN_MODEL).
+const GUN_FLIP = [-1, 0, 0, 0, 1, 0, 0, 0, -1];
+const GUN_GLTF = {
+  pistol: { model: 'gun_pistol', k: 0.30, grip: [0, -0.03, -0.02], muzzle: 0.88 },
+  smg: { model: 'gun_smg', k: 0.62, grip: [0, -0.07, 0.05], muzzle: 0.79 },
+  ar: { model: 'gun_rifle', k: 0.55, grip: [0, -0.07, 0.17], muzzle: 1.02 },
+  shotgun: { model: 'gun_shotgun', k: 0.85, grip: [0, -0.06, -0.04], muzzle: 0.97 },
+  sniper: {
+    model: 'gun_rifle', k: 0.74, grip: [0, -0.07, 0.17], muzzle: 1.02,
+    extra: [[5, 0, 0.30, -0.02, 0.07, 0.07, 0.40, 'dark'], [0, 0, 0.25, 0.06, 0.04, 0.06, 0.05, 'acc'], [0, 0, 0.25, -0.10, 0.04, 0.06, 0.05, 'acc'], [5, 0, 0.11, -0.80, 0.06, 0.06, 0.14, 'dark']],
+  },
+  pickaxe: { model: 'gun_axe', k: 0.70, grip: [0.02, 0, 0.12], muzzle: 0, pre: [0, 0, -1, -1, 0, 0, 0, 1, 0] },
+};
+const _gunGrip = new Float32Array(3);
+// Hand position in gun space for a weapon: from the model when it is loaded,
+// else the table above.
+function gunGrip(id) {
+  const gd = GUN_GLTF[id];
+  if (gd && Assets.get(gd.model)) {
+    const P = gd.pre || GUN_FLIP, g = gd.grip, k = gd.k;
+    _gunGrip[0] = (P[0] * g[0] + P[3] * g[1] + P[6] * g[2]) * k;
+    _gunGrip[1] = (P[1] * g[0] + P[4] * g[1] + P[7] * g[2]) * k;
+    _gunGrip[2] = (P[2] * g[0] + P[5] * g[1] + P[8] * g[2]) * k;
+    return _gunGrip;
+  }
+  return GUN_GRIP[id] || GUN_GRIP.default;
+}
+// Muzzle offset along the gun's -Z (metres, before GUN_SCALE).
+function gunMuzzle(id) {
+  const gd = GUN_GLTF[id];
+  return gd && Assets.get(gd.model) ? -gd.muzzle * gd.k : -1.0;
+}
 const PITCH_K = -0.62;   // chest bend per radian of aim pitch (sign: model faces +Z)
 
 function renderScene() {
@@ -1512,7 +1551,7 @@ function renderScene() {
   // of the same footprint. Colliders never look at the model, so sight lines and
   // cover read the same either way.
   for (const pr of World.props) {
-    if (!R.inView(pr.x, pr.z, pr.cull, pr.kind === 'bush' || pr.kind === 'rug' ? 150 : VIEW)) continue;
+    if (!R.inView(pr.x, pr.z, pr.cull, pr.kind === 'grass' ? 95 : pr.kind === 'bush' || pr.kind === 'rug' ? 150 : VIEW)) continue;
     const flash = pr.hitT > 0;
     const mdl = Assets.get(pr.model);
     if (mdl) {
@@ -1532,13 +1571,13 @@ function renderScene() {
   }
 
   // chests
-  const chestMdl = Assets.get('chest');
+  const chestMdl = Assets.get('chest_z');
   for (const ch of World.chests) {
     if (!R.inView(ch.x, ch.z, 1.2, VIEW)) continue;
     const bob = ch.opened ? 0 : Math.sin(G.t * 2 + ch.t) * 0.05;
     if (chestMdl) {
       const t = ch.opened ? COL_CHEST_OPEN : COL_WHITE;
-      R.pushModel(chestMdl, ch.x, ch.y + bob, ch.z, ch.rot || 0, 1.1, t[0], t[1], t[2], 1);
+      R.pushModel(chestMdl, ch.x, ch.y + bob, ch.z, ch.rot || 0, 0.85, t[0], t[1], t[2], 1);
     } else {
       R.box(ch.x, ch.y + 0.45 + bob, ch.z, 1.4, 0.9, 1.0, ch.opened ? COL_CHEST_OPEN : COL_CHEST, ch.rot || 0);
     }
@@ -1699,9 +1738,26 @@ const GUN_MODEL = {
 // base = 4x4 rigid transform (rotation + translation, uniform scale allowed);
 // every part is placed relative to it.
 function drawGunXf(id, base, acc, scale) {
-  const parts = GUN_MODEL[id];
-  if (!parts) return;
   const m = _gm2, sc = scale || 1;
+  const gd = GUN_GLTF[id], mdl = gd && Assets.get(gd.model);
+  let parts = GUN_MODEL[id];
+  if (mdl) {
+    // model matrix = base · pre-rotation · scale (columns of `pre` are the model
+    // axes expressed in gun space)
+    const P = gd.pre || GUN_FLIP, s = sc * gd.k;
+    for (let c = 0; c < 3; c++) {
+      const px = P[c * 3], py = P[c * 3 + 1], pz = P[c * 3 + 2];
+      m[c * 4] = (base[0] * px + base[4] * py + base[8] * pz) * s;
+      m[c * 4 + 1] = (base[1] * px + base[5] * py + base[9] * pz) * s;
+      m[c * 4 + 2] = (base[2] * px + base[6] * py + base[10] * pz) * s;
+      m[c * 4 + 3] = 0;
+    }
+    m[12] = base[12]; m[13] = base[13]; m[14] = base[14]; m[15] = 1;
+    R.pushModelXf(mdl, m, 1, 1, 1, 1);
+    parts = gd.extra;
+    if (!parts) return;
+  }
+  if (!parts) return;
   for (let i = 0; i < parts.length; i++) {
     const q = parts[i];
     const sx = q[4] * sc, sy = q[5] * sc, sz = q[6] * sc;
@@ -1760,9 +1816,13 @@ function drawLoot(l) {
   if (l.kind === 'weapon') {
     drawGun(l.data.item.id, l.x, y, l.z, spin, l.rest ? 0.0 : G.t * 4, 0.85 * s, col);
   } else if (l.kind === 'ammo') {
-    R.push(ITEM_MESH.ammo, l.x, y, l.z, spin, l.rest ? 0 : G.t * 4, 0.55 * s, 0.4 * s, 0.55 * s, col[0], col[1], col[2], 1);
+    const m = Assets.get('pickup_bullets');
+    if (m) R.pushModel(m, l.x, y - 0.22, l.z, spin, 0.5 * s, 1, 1, 1, 1);
+    else R.push(ITEM_MESH.ammo, l.x, y, l.z, spin, l.rest ? 0 : G.t * 4, 0.55 * s, 0.4 * s, 0.55 * s, col[0], col[1], col[2], 1);
   } else if (l.kind === 'medkit') {
-    R.push(ITEM_MESH.medkit, l.x, y, l.z, spin, l.rest ? 0 : G.t * 4, 0.62 * s, 0.42 * s, 0.62 * s, 1, 1, 1, 1);
+    const m = Assets.get('pickup_health');
+    if (m) R.pushModel(m, l.x, y - 0.25, l.z, spin, 0.55 * s, 1, 1, 1, 1);
+    else R.push(ITEM_MESH.medkit, l.x, y, l.z, spin, l.rest ? 0 : G.t * 4, 0.62 * s, 0.42 * s, 0.62 * s, 1, 1, 1, 1);
   } else if (l.kind === 'shield') {
     const m = Assets.get('bottle_a');
     if (m) R.pushModel(m, l.x, y - 0.3, l.z, spin, 0.9 * s, 0.55, 0.9, 1.9, 1);
@@ -1864,7 +1924,7 @@ function drawChar(e) {
     const hs = rig.names['handslot.r'];
     if (hs !== undefined && !e.buildMode && it) {
       m4Mul(_gm, e.xf, a.nodeWorld(hs));
-      const grip = GUN_GRIP[it.id] || GUN_GRIP.default;
+      const grip = gunGrip(it.id);
       // recoil jolt: the muzzle rises and the gun is shoved back along its barrel (+Z in gun space)
       const punch = e.gunKick * gunPunch(it), back = 0.07 * punch;
       m4YawPitch(_gm3, 0, 0, 0, e.yaw, it.id === 'pickaxe' ? 0 : -e.pitch - 0.10 * punch, 1);
@@ -1874,7 +1934,7 @@ function drawChar(e) {
       _gm3[14] = _gm[14] - (_gm3[2] * grip[0] + _gm3[6] * grip[1] + _gm3[10] * grip[2]) * gs + _gm3[10] * back;
       drawGunXf(it.id, _gm3, it.id === 'pickaxe' ? COL_GUN_METAL : RARITY[it.rar].col, gs);
       if (e.muzzleT > 0 && gun) {
-        const mz = -1.0;   // muzzle along the gun's -Z
+        const mz = gunMuzzle(it.id) * gs;   // muzzle along the gun's -Z
         const mx = _gm3[12] + _gm3[8] * mz, my = _gm3[13] + _gm3[9] * mz, mzz = _gm3[14] + _gm3[10] * mz;
         R.push(MESH_SPHERE, mx, my, mzz, 0, 0, 0.5, 0.5, 0.5, 1.0, 0.85, 0.4, 0.85);
       }
@@ -2680,7 +2740,8 @@ function showMenu() {
 const MANIFEST = (() => {
   const m = {};
   for (const k in PROP_DEF) for (const name of PROP_DEF[k].models) m[name] = 'assets/' + name + '.glb';
-  for (const name of ['chest', 'bottle_a']) m[name] = 'assets/' + name + '.glb';
+  for (const name of ['chest_z', 'bottle_a', 'pickup_health', 'pickup_bullets']) m[name] = 'assets/' + name + '.glb';
+  for (const k in GUN_GLTF) m[GUN_GLTF[k].model] = 'assets/' + GUN_GLTF[k].model + '.glb';
   for (const c of CHAR_SKINS) m[c] = { url: 'assets/' + c + '.glb', skipNodes: '^handslot\\.' };
   return m;
 })();

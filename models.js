@@ -111,6 +111,15 @@ async function decodeImage(g, buffers, index, baseUrl) {
   return createImageBitmap(blob);
 }
 
+// A stable key for an image the renderer can share between models: the resolved
+// URL of an external file (a bark texture used by five trees is uploaded once),
+// nothing for an image embedded in the file.
+function imageKey(g, index, baseUrl) {
+  const img = (g.images || [])[index];
+  if (!img || img.uri === undefined || /^data:/.test(img.uri)) return null;
+  return new URL(img.uri, baseUrl).href;
+}
+
 /* ------------------------------ the loader --------------------------------- */
 
 function parseGLB(ab) {
@@ -172,16 +181,49 @@ function flattenScene(g) {
   return found;
 }
 
-// glTF base colour for a material, plus the image index it samples (if any).
+// Material names that mean "foliage": lit with a softened, upward-leaning normal
+// so a tree canopy of criss-crossing leaf cards reads as one bright volume rather
+// than a jumble of dark and lit facets.
+const FOLIAGE_RE = /leaves|leaf|foliage|bush|grass|flower|petal|needle/i;
+
+// glTF base colour for a material, plus the image index it samples (if any), the
+// alpha mode (MASK / BLEND parts are drawn — and shadowed — as cutouts), the
+// emissive colour and whether it is foliage.
 function materialOf(g, mi) {
-  const m = (g.materials || [])[mi];
-  const pbr = (m && m.pbrMetallicRoughness) || {};
-  const out = { color: pbr.baseColorFactor ? pbr.baseColorFactor.slice() : [1, 1, 1, 1], image: null, sampler: undefined };
+  const m = (g.materials || [])[mi] || {};
+  const pbr = m.pbrMetallicRoughness || {};
+  const out = {
+    color: pbr.baseColorFactor ? pbr.baseColorFactor.slice() : [1, 1, 1, 1], image: null, sampler: undefined,
+    cutout: m.alphaMode === 'MASK' || m.alphaMode === 'BLEND',
+    emissive: m.emissiveFactor ? m.emissiveFactor.slice(0, 3) : null,
+    foliage: FOLIAGE_RE.test(m.name || ''),
+  };
   if (pbr.baseColorTexture) {
     const tex = (g.textures || [])[pbr.baseColorTexture.index];
     if (tex) { if (tex.source !== undefined) out.image = tex.source; out.sampler = tex.sampler; }
   }
+  // KHR_materials_emissive_strength scales the factor; a black factor stays black
+  const es = m.extensions && m.extensions.KHR_materials_emissive_strength;
+  if (out.emissive && es && es.emissiveStrength) out.emissive = out.emissive.map(v => v * es.emissiveStrength);
+  if (out.emissive && !out.emissive.some(v => v > 0)) out.emissive = null;
   return out;
+}
+
+// Decode a part's image (once per distinct image per file) and attach the
+// material's flags to the part record the renderer uploads.
+async function finishPart(json, buffers, baseUrl, imageCache, mat, verts, idx) {
+  let image = null, key = null;
+  if (mat.image !== null && mat.image !== undefined) {
+    if (!imageCache.has(mat.image)) imageCache.set(mat.image, decodeImage(json, buffers, mat.image, baseUrl));
+    image = await imageCache.get(mat.image);
+    key = imageKey(json, mat.image, baseUrl);
+  }
+  const sampler = mat.sampler !== undefined ? (json.samplers || [])[mat.sampler] : null;
+  return {
+    verts, idx, color: mat.color, image, imageKey: key,
+    wrapS: sampler && sampler.wrapS, wrapT: sampler && sampler.wrapT,
+    cutout: mat.cutout && !!image, emissive: mat.emissive, foliage: mat.foliage,
+  };
 }
 
 /* Parse an already-fetched glTF/GLB into CPU parts.
@@ -260,20 +302,8 @@ async function parseGLTF(ab, baseUrl, opts) {
   const imageCache = new Map();
   const parts = [];
   for (const pair of groups) {
-    const mat = materialOf(json, pair[0]), grp = pair[1];
-    let image = null;
-    if (mat.image !== null && mat.image !== undefined) {
-      if (!imageCache.has(mat.image)) imageCache.set(mat.image, decodeImage(json, buffers, mat.image, baseUrl));
-      image = await imageCache.get(mat.image);
-    }
-    const sampler = mat.sampler !== undefined ? (json.samplers || [])[mat.sampler] : null;
-    parts.push({
-      verts: new Float32Array(grp.verts),
-      idx: new Uint32Array(grp.idx),
-      color: mat.color,
-      image,
-      wrapS: sampler && sampler.wrapS, wrapT: sampler && sampler.wrapT,
-    });
+    const grp = pair[1];
+    parts.push(await finishPart(json, buffers, baseUrl, imageCache, materialOf(json, pair[0]), new Float32Array(grp.verts), new Uint32Array(grp.idx)));
   }
   return { parts, min, max };
 }
@@ -437,14 +467,8 @@ async function parseSkinned(json, buffers, baseUrl, opts) {
   const imageCache = new Map();
   const parts = [];
   for (const pair of groups) {
-    const mat = materialOf(json, pair[0]), grp = pair[1];
-    let image = null;
-    if (mat.image !== null && mat.image !== undefined) {
-      if (!imageCache.has(mat.image)) imageCache.set(mat.image, decodeImage(json, buffers, mat.image, baseUrl));
-      image = await imageCache.get(mat.image);
-    }
-    const sampler = mat.sampler !== undefined ? (json.samplers || [])[mat.sampler] : null;
-    parts.push({ verts: new Float32Array(grp.verts), idx: new Uint32Array(grp.idx), color: mat.color, image, wrapS: sampler && sampler.wrapS, wrapT: sampler && sampler.wrapT });
+    const grp = pair[1];
+    parts.push(await finishPart(json, buffers, baseUrl, imageCache, materialOf(json, pair[0]), new Float32Array(grp.verts), new Uint32Array(grp.idx)));
   }
 
   // animation clips: node + path + keyframe times/values, LINEAR (STEP treated
