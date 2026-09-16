@@ -16,8 +16,11 @@ const ok = (cond, msg) => { if (cond) { pass++; console.log('  ok   ' + msg); } 
 // ---- an in-memory relay with the server's routing rules ----
 const relay = { clients: new Map(), hostId: 1 };
 function deliver(id, m) { const c = relay.clients.get(id); if (c) c.Net.onMessage(m); }
+const sent = {};                                   // "fromId:type" -> count, for the checks below
 function route(fromId, m) {
   if (m.t !== 'to') return;
+  const k = fromId + ':' + (m.d && m.d.t);
+  sent[k] = (sent[k] || 0) + 1;
   const env = { t: 'from', id: fromId, d: JSON.parse(JSON.stringify(m.d)) };   // over the wire = JSON
   if (m.to === 'host') { if (relay.hostId !== fromId) deliver(relay.hostId, env); }
   else if (m.to === 'all') { for (const id of relay.clients.keys()) if (id !== fromId) deliver(id, env); }
@@ -43,7 +46,7 @@ function makeInstance(label) {
   const ctx = vm.createContext(sandbox);
   for (const f of SCRIPTS) vm.runInContext(fs.readFileSync(path.join(root, f), 'utf8'), ctx, { filename: label + ':' + f });
   // top-level const/function bindings are not properties of the sandbox — pull out the ones the test drives
-  const api = vm.runInContext('({ Net, G, World, Input, makeEntity, entById, update, terrainHeight, surfaceUnder, dealDamage, buildPlan, pieceKey, tryBuild, damagePiece, updateSupport, spawnLoot, tossLoot, lootById, requestTake, dropHeld, applyDamage, nextSpectate })', ctx);
+  const api = vm.runInContext('({ Net, G, World, Input, makeEntity, entById, update, terrainHeight, surfaceUnder, dealDamage, buildPlan, pieceKey, tryBuild, damagePiece, updateSupport, spawnLoot, tossLoot, lootById, requestTake, dropHeld, applyDamage, nextSpectate, canRunNow })', ctx);
   api.document = sandbox.document; api.window = sandbox;
   return api;
 }
@@ -174,6 +177,26 @@ for (const b of H.G.ents) if (b.isBot && b.alive) H.applyDamage(b, 10000, null, 
 step(3, 1 / 20);
 ok(H.G.state === 'win' && H.G.placement === 1, 'end: host wins');
 ok(C.G.state === 'dead' && C.Net.endTitle === 'HOST WINS' && !C.G.spec, 'end: the client is told who won');
+
+// ---- 8. a second match from the same lobby, then the host walks out of it ----
+H.Net.startMatch();
+ok(H.G.state === 'drop' && C.G.state === 'drop' && C.Net.client && !C.Net.endTitle, 'rematch: both drop again from the same lobby');
+ok(H.G.ents.filter(e => e.isBot).every(e => e.id >= 1000) && C.G.ents.filter(e => e.isBot).every(e => e.id >= 1000), 'rematch: bot ids live far above any lobby id');
+land(H); land(C);
+step(5, 1 / 20);
+// the host losing pointer lock must not freeze the match for everyone
+C.window.__NOLOCK = false; C.Input.locked = false; C.Input.padActive = false;
+ok(C.canRunNow(), 'a lobby match keeps simulating while the pointer is not locked');
+C.window.__NOLOCK = true;
+// the server says the host is gone and Friend is host now
+C.Net.onMessage({ t: 'hostLeft', hostId: 2 });
+C.Net.onMessage({ t: 'players', hostId: 2, players: [{ id: 2, name: 'Friend', skin: 'char_mage' }] });
+ok(C.G.state === 'dead' && C.Net.endTitle === 'HOST LEFT', 'host left: the client sees the match end');
+ok(!C.Net.inMatch && !C.Net.hosting && !C.World.authority, 'host left: the client is out of the match, not promoted into running a stale one');
+const snapsBefore = sent['2:snap'] || 0, stBefore = sent['2:st'] || 0;
+step(20, 1 / 20);
+ok((sent['2:snap'] || 0) === snapsBefore && (sent['2:st'] || 0) === stBefore, 'host left: the promoted client sends no snapshots or poses for the dead match');
+ok(C.Net.active && C.Net.hostId === 2, 'host left: still in the lobby, as its host');
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

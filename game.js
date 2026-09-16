@@ -131,7 +131,7 @@ function newMatch(setup) {
     if (setup.bots) for (let i = humans.length; i < PLAYER_COUNT; i++) {
       const n = names.length ? names.splice((Math.random() * names.length) | 0, 1)[0] : 'Bot' + i;
       const b = makeEntity(true, n, [rnd(0.35, 0.95), rnd(0.3, 0.9), rnd(0.35, 0.95)], pick(CHAR_SKINS));
-      b.id = 100 + i;
+      b.id = 1000 + i;          // far above any lobby id the relay could ever hand out
       b.remote = !World.authority;
       b.skill = rnd(0.25, 0.85);
       b.shield = Math.round(rnd(0, BOT_SHIELD));
@@ -159,13 +159,7 @@ function newMatch(setup) {
       e.glide = false;
     }
     G.bus = { x: sx + bx * HALF * 1.6, z: sz + bz * HALF * 1.6, y: 178, dx: bx, dz: bz, t: 0 };
-
-    G.storm = {
-      cx: rnd(-40, 40), cz: rnd(-40, 40), r: HALF * 1.45,
-      tcx: 0, tcz: 0, tr: HALF * 1.45,
-      phase: -1, timer: 4, shrinking: false, dps: 0, r0: HALF * 1.45, tickT: 0,
-    };
-    nextStormPhase();
+    newStorm();
   });
   // remote entities are placed by the network, so the drop never waits on them
   for (const e of G.ents) if (e.remote) e.landed = true;
@@ -176,10 +170,23 @@ function newMatch(setup) {
 
 function entById(id) { for (const e of G.ents) if (e.id === id) return e; return null; }
 
+function newStorm() {
+  G.storm = {
+    cx: rnd(-40, 40), cz: rnd(-40, 40), r: HALF * 1.45,
+    tcx: 0, tcz: 0, tr: HALF * 1.45,
+    phase: -1, timer: 4, shrinking: false, dps: 0, r0: HALF * 1.45, tickT: 0,
+  };
+  nextStormPhase();
+}
+
+// Past the last circle the storm is closed for good: nothing left to count down
+// to (the HUD says so — see stormLabel), only the damage tick keeps running.
+const STORM_DONE_T = 1e9;
+
 function nextStormPhase() {
   const s = G.storm;
   s.phase++;
-  if (s.phase >= STORM_PHASES.length) { s.shrinking = false; s.timer = 9999; return; }
+  if (s.phase >= STORM_PHASES.length) { s.shrinking = false; s.timer = STORM_DONE_T; return; }
   const ph = STORM_PHASES[s.phase];
   s.dps = ph.dps;
   s.tr = s.r0 * ph.r;
@@ -193,7 +200,7 @@ function nextStormPhase() {
 
 function updateStorm(dt) {
   const s = G.storm;
-  s.timer -= dt;
+  if (s.phase < STORM_PHASES.length) s.timer -= dt;
   if (!World.authority) {   // phase changes and damage come from the host
     if (s.shrinking) {
       const k = 1 - clamp(s.timer / s.shrinkDur, 0, 1);
@@ -201,7 +208,7 @@ function updateStorm(dt) {
     }
     return;
   }
-  if (s.timer <= 0) {
+  if (s.timer <= 0 && s.phase < STORM_PHASES.length) {
     if (!s.shrinking) {
       s.shrinking = true; s.timer = s.shrinkDur;
       s.fromR = s.r; s.fromX = s.cx; s.fromZ = s.cz;
@@ -225,6 +232,14 @@ function updateStorm(dt) {
 }
 
 function inStorm(x, z) { const s = G.storm; return dist2(x, z, s.cx, s.cz) > s.r * s.r; }
+
+// The HUD's storm line. After the final circle there is nothing to count down.
+function stormLabel(s) {
+  if (s.phase >= STORM_PHASES.length) return 'STORM CLOSED';
+  const t = Math.max(0, s.timer);
+  const mm = Math.floor(t / 60), ss = Math.floor(t % 60);
+  return (s.shrinking ? 'STORM MOVING  ' : 'STORM IN  ') + mm + ':' + String(ss).padStart(2, '0');
+}
 
 /* -------------------------------- combat ----------------------------------- */
 
@@ -455,20 +470,50 @@ function startReload(e) {
   const it = curItem(e);
   if (!it || it.mag === undefined) return;
   const w = WEAPONS[it.id];
-  if (!w.ammo || it.mag >= w.mag) return;
-  if (!e.isBot && e.ammo[w.ammo] <= 0) { say('OUT OF ' + w.ammo.toUpperCase() + ' AMMO'); return; }
+  if (!w || !w.ammo || it.mag >= w.mag) return;   // potions and medkits have no magazine
+  if (!e.isBot && e.ammo[w.ammo] <= 0) { if (e === G.player) say('OUT OF ' + w.ammo.toUpperCase() + ' AMMO'); return; }
   e.reloadT = w.reload;
+  e.reloadItem = it;          // the reload belongs to this gun; a slot switch cancels it
   playUpper(e, it.id === 'pistol' ? '1H_Ranged_Reload' : '2H_Ranged_Reload', w.reload);
 }
 function finishReload(e) {
-  const it = curItem(e);
-  if (!it) return;
-  const w = WEAPONS[it.id];
-  if (!w.ammo) return;
+  const it = curItem(e), w = it ? WEAPONS[it.id] : null;
+  const mine = it && it === e.reloadItem;
+  e.reloadItem = null;
+  // The timer ran out on something else (wheeled to a potion, swapped the gun
+  // for one on the ground): that item gets nothing — it never started a reload.
+  if (!mine || !w || !w.ammo) return;
   if (e.isBot) { it.mag = w.mag; return; }
   const need = w.mag - it.mag;
   const have = Math.min(need, e.ammo[w.ammo]);
   it.mag += have; e.ammo[w.ammo] -= have;
+}
+
+// Whatever was in progress on the held slot stops when the slot changes: a reload
+// must not finish on the next gun, a heal must not eat whatever is held by then.
+function cancelActions(e) {
+  e.reloadT = 0; e.reloadItem = null;
+  if (e.useT > 0) { e.useT = 0; e.useKind = null; }
+}
+
+// Consumables. The slot is remembered so a finished heal consumes the potion it
+// started on — never whatever happens to be held by then.
+function startUse(e) {
+  const it = curItem(e);
+  if (!it || (it.id !== 'shield' && it.id !== 'medkit') || e.useT > 0) return false;
+  e.useT = it.id === 'shield' ? 2.2 : 3.6; e.useKind = it.id; e.useSlot = e.slot;
+  playUpper(e, 'Use_Item', e.useT);
+  return true;
+}
+function finishUse(e) {
+  const kind = e.useKind, slot = e.useSlot, it = e.inv[slot];
+  e.useT = 0; e.useKind = null;
+  if (!kind || !it || it.id !== kind) return;     // lost or switched away mid-use
+  e.inv[slot] = null;
+  if (!World.authority) Net.heal(kind);           // the host keeps the health
+  else if (kind === 'shield') e.shield = Math.min(100, e.shield + 50);
+  else e.hp = Math.min(100, e.hp + 100);
+  if (e === G.player) Sfx.pickup();
 }
 
 function swingPickaxe(e) {
@@ -607,7 +652,7 @@ function updatePlayer(e, dt) {
   if (wasAir && e.grounded && e.vel[1] <= 0) spawnParticles(e.pos[0], e.pos[1] + 0.1, e.pos[2], 5, [0.6, 0.55, 0.45], 1.8, 0.1, 0.35, 8);
 
   // ---- inventory / mode switching ----
-  for (let i = 0; i < 5; i++) if (Input.hit('Digit' + (i + 1))) { e.slot = i; e.buildMode = false; e.reloadT = 0; e.useT = 0; }
+  for (let i = 0; i < 5; i++) if (Input.hit('Digit' + (i + 1))) { if (i !== e.slot) cancelActions(e); e.slot = i; e.buildMode = false; }
   // in build mode the wheel picks the piece, otherwise the inventory slot
   if (Input.wheel) {
     if (e.buildMode) e.buildType = (e.buildType + (Input.wheel > 0 ? 1 : 3)) % 4;
@@ -640,7 +685,7 @@ function updatePlayer(e, dt) {
   } else {
     const it = curItem(e);
     if (it && (it.id === 'shield' || it.id === 'medkit')) {
-      if ((Input.clicked[0] || padFireHit) && e.useT <= 0) { e.useT = it.id === 'shield' ? 2.2 : 3.6; e.useKind = it.id; playUpper(e, 'Use_Item', e.useT); }
+      if (Input.clicked[0] || padFireHit) startUse(e);
     } else if (it) {
       const w = WEAPONS[it.id];
       const auto = it.id === 'ar' || it.id === 'smg';
@@ -651,15 +696,7 @@ function updatePlayer(e, dt) {
       if (Input.hit('KeyR')) startReload(e);
     }
   }
-  if (e.useT > 0) {
-    e.useT -= dt;
-    if (e.useT <= 0) {
-      if (!World.authority) Net.heal(e.useKind);   // the host keeps the health
-      else if (e.useKind === 'shield') e.shield = Math.min(100, e.shield + 50);
-      else e.hp = Math.min(100, e.hp + 100);
-      e.inv[e.slot] = null; e.useKind = null; Sfx.pickup();
-    }
-  }
+  if (e.useT > 0) { e.useT -= dt; if (e.useT <= 0) finishUse(e); }
   autoPickup(e);
 }
 
@@ -681,6 +718,7 @@ function playerAimDir(e) {
 function cycleSlot(e, dir) {
   let s = e.slot;
   for (let i = 0; i < 5; i++) { s = (s + (dir > 0 ? 1 : 4)) % 5; if (e.inv[s]) break; }
+  if (s !== e.slot) cancelActions(e);
   e.slot = s; e.buildMode = false;
 }
 
@@ -701,7 +739,7 @@ function builderPro(e) {
 
   if (Input.padHit(PAD.B)) {
     e.buildMode = !e.buildMode; e.buildArm = -1;
-    if (e.buildMode) { e.reloadT = 0; e.useT = 0; }
+    if (e.buildMode) cancelActions(e);
   }
 
   if (!e.buildMode) {
@@ -718,7 +756,7 @@ function builderPro(e) {
     }
     if (Input.padHit(PAD.X)) e.buildRot = (e.buildRot + 1) % 4;
   }
-  if (Input.padHit(PAD.Y)) { e.slot = 0; e.buildMode = false; e.reloadT = 0; e.useT = 0; }   // pickaxe
+  if (Input.padHit(PAD.Y)) { if (e.slot !== 0) cancelActions(e); e.slot = 0; e.buildMode = false; }   // pickaxe
   if (Input.padHit(PAD.UP)) cycleSlot(e, 1);
   if (Input.padHit(PAD.DOWN)) cycleSlot(e, -1);
   if (!e.buildMode && Input.padHit(PAD.X)) {        // one contextual button, as on console
@@ -950,6 +988,7 @@ function takeLoot(e, l, swap) {
   e.inv[slot] = l.kind === 'weapon' ? l.data.item
     : { id: l.kind, rar: l.kind === 'shield' ? 2 : 3, mag: 0 };
   removeLoot(l, e.id);
+  cancelActions(e);   // a reload or heal in progress must not carry over onto the new item
   if (old) {   // whatever was in that slot goes back on the ground
     const fx = -Math.sin(e.yaw), fz = -Math.cos(e.yaw);
     netDropLoot(old.id === 'shield' || old.id === 'medkit' ? old.id : 'weapon',
@@ -982,8 +1021,7 @@ function dropHeld(e) {
     e.pos[0] + fx * 0.6, e.pos[1] + 1.25, e.pos[2] + fz * 0.6, { item: it },
     fx * 6.5, 3.4, fz * 6.5, 1.1);
   e.inv[e.slot] = null;
-  if (e.reloadT > 0) e.reloadT = 0;
-  if (e.useT > 0) { e.useT = 0; e.useKind = null; }
+  cancelActions(e);
   playUpper(e, 'Throw', 0.5);
   Sfx.swing();
   if (e === G.player) {
@@ -1044,7 +1082,10 @@ function autoPickup(e) {
 
 function updateBot(b, dt) {
   if (!b.alive) return;
-  if (!b.landed && G.state === 'drop' && b.pos[1] > terrainHeight(b.pos[0], b.pos[2]) + 0.1) {
+  // Still coming down from the bus: keep diving until touchdown, whether or not
+  // the player has already landed (the state flips to 'play' the moment they
+  // do, which used to freeze every airborne bot's glider open for the match).
+  if (!b.landed && b.pos[1] > terrainHeight(b.pos[0], b.pos[2]) + 0.1) {
     const dx = b.landing.x - b.pos[0], dz = b.landing.z - b.pos[2];
     const l = len2(dx, dz) || 1;
     b.yaw = Math.atan2(-dx, -dz);
@@ -1062,7 +1103,7 @@ function updateBot(b, dt) {
   // grabbing a weapon 20m away beats sprinting to the circle empty-handed
   const grabFirst = b.lootTarget && dist2(b.pos[0], b.pos[2], b.lootTarget[0], b.lootTarget[1]) < 25 * 25;
   if (dc > s.r * 0.78 && !grabFirst) { goX = s.cx; goZ = s.cz; sprint = true; }   // rotate to safety
-  else if (b.target) {                                                   // fight
+  else if (b.target && b.target.alive) {                                 // fight
     if (b.useT > 0) { b.useT = 0; b.useKind = null; }   // getting shot at interrupts a heal
     const t = b.target;
     const d = Math.sqrt(dist2(b.pos[0], b.pos[2], t.pos[0], t.pos[2]));
@@ -1150,7 +1191,7 @@ function updateBot(b, dt) {
 
   if (b.fireT > 0) b.fireT -= dt;
   if (b.reloadT > 0) { b.reloadT -= dt; if (b.reloadT <= 0) finishReload(b); }
-  if (b.useT > 0) { b.useT -= dt; if (b.useT <= 0) botFinishConsume(b); }
+  if (b.useT > 0) { b.useT -= dt; if (b.useT <= 0) finishUse(b); }
 }
 
 function botThink(b) {
@@ -1173,15 +1214,6 @@ function botThink(b) {
   }
   b.lootTarget = botHasGun(b) ? null : findLootTarget(b, 80);
   if (!b.wander[0] && !b.wander[1]) botPickWander(b);
-}
-
-function botFinishConsume(b) {
-  if (b.inv[b.useSlot] && b.inv[b.useSlot].id === b.useKind) {
-    if (b.useKind === 'shield') b.shield = Math.min(100, b.shield + 50);
-    else b.hp = Math.min(100, b.hp + 100);
-    b.inv[b.useSlot] = null;
-  }
-  b.useKind = null;
 }
 
 function botHasGun(b) {
@@ -1297,6 +1329,7 @@ const PITCH_K = -0.62;   // chest bend per radian of aim pitch (sign: model face
 
 function renderScene() {
   const p = G.player;
+  const ce = (G.spec && !p.alive) ? G.spec : p;   // whose eyes we look through (spectating follows someone else)
   let cam, yaw, pitch, fov;
   if (G.state === 'menu') {
     // slow orbit around the central POI behind the menu
@@ -1309,7 +1342,6 @@ function renderScene() {
   } else if (G.debugCam) {
     cam = G.debugCam; yaw = cam.yaw; pitch = cam.pitch; fov = 1.1;
   } else {
-    const ce = (G.spec && !p.alive) ? G.spec : p;   // spectating follows someone else
     cam = cameraState(ce);
     yaw = ce.yaw; pitch = ce.pitch;
     fov = ce.fov === undefined ? FOV.base : ce.fov;   // eased in updateCamera
@@ -1396,10 +1428,10 @@ function renderScene() {
   // characters (dead ones linger for a few seconds, playing their fall)
   for (const e of G.ents) {
     if (!e.alive && e.deadT > 5) continue;
-    if (e === G.player && G.firstPerson && G.state !== 'menu') continue;
-    // the player's own body sits right where the boom camera pivots, so never
-    // cull it on the wedge — only on distance, which it always passes
-    if (e !== G.player && !R.inView(e.pos[0], e.pos[2], 2.2, VIEW)) continue;   // glider is 3.4 across
+    if (e === ce && G.firstPerson && G.state !== 'menu') continue;   // never draw the head we look out of
+    // the viewed body sits right where the boom camera pivots, so never cull it
+    // on the wedge — only on distance, which it always passes
+    if (e !== ce && !R.inView(e.pos[0], e.pos[2], 2.2, VIEW)) continue;   // glider is 3.4 across
     drawChar(e);
   }
   if (G.firstPerson && p.alive && G.state !== 'menu') drawFirstPersonGun(p, cam);
@@ -1920,9 +1952,9 @@ function drawSlots(W, H) {
       hud.textAlign = 'center'; hud.fillText('[G] DROP', x + sw / 2, y + sh + 11);
     }
   }
-  if (p.reloadT > 0) {
-    const it = curItem(p);
-    bar(W / 2 - 90, y - 26, 180, 12, 1 - p.reloadT / WEAPONS[it.id].reload, '#ffcc44');
+  const held = curItem(p), heldW = held && WEAPONS[held.id];
+  if (p.reloadT > 0 && heldW && heldW.reload) {
+    bar(W / 2 - 90, y - 26, 180, 12, 1 - p.reloadT / heldW.reload, '#ffcc44');
     hud.textAlign = 'center'; hud.fillStyle = '#fff'; hud.font = '700 12px system-ui, sans-serif';
     hud.fillText('RELOADING', W / 2, y - 36);
   }
@@ -2113,10 +2145,7 @@ function drawTopRight(W, H) {
   hud.fillText(G.alive + ' ALIVE', W - 30, cy + R2 + 22);
   hud.font = '700 13px system-ui, sans-serif';
   hud.fillStyle = s.shrinking ? '#c98bff' : 'rgba(255,255,255,.75)';
-  const t = Math.max(0, s.timer);
-  const mm = Math.floor(t / 60), ss = Math.floor(t % 60);
-  hud.fillText((s.shrinking ? 'STORM MOVING  ' : 'STORM IN  ') + mm + ':' + String(ss).padStart(2, '0'),
-    W - 30, cy + R2 + 44);
+  hud.fillText(stormLabel(s), W - 30, cy + R2 + 44);
   hud.fillStyle = 'rgba(255,255,255,.75)';
   hud.fillText('ELIMS  ' + G.player.kills, W - 30, cy + R2 + 64);
 }
@@ -2130,7 +2159,7 @@ function drawFeed(W, H) {
     const text = f.a + '  ⚔  ' + f.b;
     const w = hud.measureText(text).width + 16;
     hud.fillRect(W - 30 - w, 300 + i * 24, w, 20);
-    hud.fillStyle = f.a === 'You' ? '#ffd24a' : '#fff';
+    hud.fillStyle = f.a === G.player.name ? '#ffd24a' : '#fff';   // my own elims in gold, whatever my lobby name is
     hud.fillText(text, W - 38, 310 + i * 24);
   }
   hud.globalAlpha = 1;
@@ -2328,6 +2357,15 @@ function nextSpectate(cur) {
   return order[(i + 1) % order.length];
 }
 
+// A solo match waits while the mouse isn't captured (Esc, alt-tab). A lobby match
+// never pauses: the host's tab *is* everyone's match, and a client's poses are
+// expected too — a host pressing Esc used to freeze the bots, the storm and every
+// snapshot for the whole lobby. (A hidden host tab is covered by the interval in
+// boot(), since requestAnimationFrame stops there.)
+function canRunNow() {
+  return Input.locked || Input.padActive || G.state === 'dead' || G.state === 'win' || !!window.__NOLOCK || Net.inMatch;
+}
+
 let lastT = 0;
 function frame(now) {
   if (!window.__AUTO) requestAnimationFrame(frame);
@@ -2349,8 +2387,7 @@ function frame(now) {
     Input.endFrame();
     return;
   }
-  const canRun = Input.locked || Input.padActive || G.state === 'dead' || G.state === 'win' || window.__NOLOCK;
-  if (canRun) update(dt);
+  if (canRunNow()) update(dt);
   // Only resize when it actually changed — assigning width/height reallocates the
   // whole backing store, and doing that 60 times a second is a real frame cost.
   // (drawHUD clears the whole canvas itself, so skipping the resize is safe)
@@ -2400,7 +2437,7 @@ function startGame(setup) {
   document.getElementById('endScreen').style.display = 'none';
   _ovState = null;
   // A pad drives the camera directly — grabbing the mouse would only get in the way.
-  if (!Input.padActive && !window.__NOLOCK) R.canvas.requestPointerLock();
+  if (!window.__NOLOCK) Input.lock(R.canvas);
 }
 
 // Back to the front screen (the lobby panel stays open while connected).
@@ -2465,7 +2502,7 @@ function boot() {
   document.getElementById('specBtn').addEventListener('click', () => {
     G.spec = nextSpectate(null);
     document.getElementById('endScreen').style.display = 'none'; _ovState = null;
-    if (!Input.padActive) R.canvas.requestPointerLock();
+    if (!window.__NOLOCK) Input.lock(R.canvas);
   });
   document.getElementById('lobbyBtn').addEventListener('click', () => Net.backToLobby());
   Net.init();
