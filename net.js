@@ -289,6 +289,7 @@ const Net = {
     };
     for (const e of G.ents) {
       const es = { i: e.id, hp: r1(e.hp), sh: r1(e.shield), k: e.kills, al: e.alive ? 1 : 0, hu: e.hurtT > 0 ? 1 : 0 };
+      if (e.hurtT > 0 && e.lastHitBy) es.hb = e.lastHitBy;   // who hit them, for the damage direction arc
       if (e.isBot && e.alive) Object.assign(es, this.pose(e));
       d.es.push(es);
     }
@@ -322,7 +323,11 @@ const Net = {
       const had = e.hp + e.shield;
       e.hp = es.hp; e.shield = es.sh; e.kills = es.k;
       if (e === G.player) {
-        if (e.alive && e.hp + e.shield < had - 0.01) { G.hurtFlash = 0.35; Sfx.hurt(); e.hurtT = 0.25; playUpper(e, 'Hit_A', 0.45); }
+        if (e.alive && e.hp + e.shield < had - 0.01) {
+          G.hurtFlash = 0.35; Sfx.hurt(); e.hurtT = 0.25; playUpper(e, 'Hit_A', 0.45);
+          const by = es.hb ? entById(es.hb) : null;
+          if (by && by !== e) hurtFrom(by.pos[0], by.pos[2]);
+        }
       } else if (es.hu && !(e.hurtT > 0)) {
         e.hurtT = 0.25;
         if (e.human) playUpper(e, 'Hit_A', 0.45);
