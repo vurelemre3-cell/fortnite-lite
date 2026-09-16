@@ -207,7 +207,7 @@ function updateStorm(dt) {
     if (!s.shrinking) {
       s.shrinking = true; s.timer = s.shrinkDur;
       s.fromR = s.r; s.fromX = s.cx; s.fromZ = s.cz;
-      say('THE STORM IS CLOSING');
+      say('THE STORM IS CLOSING'); Sfx.warn();
     } else { s.r = s.tr; s.cx = s.tcx; s.cz = s.tcz; nextStormPhase(); }
   }
   if (s.shrinking) {
@@ -344,7 +344,7 @@ function eliminate(e, attacker, byStorm, placement) {
     Sfx.elim();
     if (document.pointerLockElement) document.exitPointerLock();
   } else if (attacker === G.player) {
-    G.elimFlash = 1.7; G.elimName = e.name; Sfx.elim();
+    G.elimFlash = 1.7; G.elimName = e.name; Sfx.kill();
   }
   if (!World.authority) return;   // a client hears the result from the host
   if (G.state !== 'dead' && G.alive <= 1 && G.player.alive) {
@@ -449,8 +449,9 @@ function tryFire(e, aimX, aimY, aimZ) {
   if (e === G.player) {
     e.recoil += w.melee ? 0 : (w.dmg > 80 ? 0.05 : 0.014);
     Sfx.shoot(it.id);
-  } else if (dist2(e.pos[0], e.pos[2], G.player.pos[0], G.player.pos[2]) < 90 * 90) {
-    Sfx.shoot(it.id);
+  } else {
+    const d2 = dist2(e.pos[0], e.pos[2], G.player.pos[0], G.player.pos[2]);
+    if (d2 < 95 * 95) Sfx.shoot(it.id, clamp(1.1 - Math.sqrt(d2) / 95, 0.12, 1));   // quieter with distance
   }
   if (it.mag <= 0) startReload(e);
   return true;
@@ -472,6 +473,7 @@ function startReload(e) {
   if (!e.isBot && e.ammo[w.ammo] <= 0) { say('OUT OF ' + w.ammo.toUpperCase() + ' AMMO'); return; }
   e.reloadT = w.reload;
   playUpper(e, it.id === 'pistol' ? '1H_Ranged_Reload' : '2H_Ranged_Reload', w.reload);
+  sfxNear(e, () => Sfx.reload(w.reload));
 }
 function finishReload(e) {
   const it = curItem(e);
@@ -506,9 +508,10 @@ function swingPickaxe(e) {
   else return;
   const t = hitStatic.t;
   materialChips(MAT_COLOR[matType], ox + dir[0] * t, oy + dir[1] * t, oz + dir[2] * t, 7);
+  sfxNear(e, () => Sfx.harvest(matType));
   if (mats > 0) {
     e.mats[matType] = Math.min(999, e.mats[matType] + mats);
-    if (e === G.player) { Sfx.pickup(); pushDamage(ox + dir[0] * 2, oy + dir[1] * 2, oz + dir[2] * 2, mats, false); }
+    if (e === G.player) pushDamage(ox + dir[0] * 2, oy + dir[1] * 2, oz + dir[2] * 2, mats, false);
   }
 }
 
@@ -894,7 +897,7 @@ function openChest(ch, e) {
 }
 function chestBurst(ch, e) {
   spawnParticles(ch.x, ch.y + 0.8, ch.z, 14, [1.0, 0.85, 0.35], 3.5, 0.1, 0.8, 6);
-  if (e) { sfxNear(e, Sfx.pickup.bind(Sfx)); if (e === G.player) say('CHEST OPENED'); }
+  if (e) { sfxNear(e, () => Sfx.chest()); if (e === G.player) say('CHEST OPENED'); }
 }
 
 // Picking something up. Solo and the host just take it; a client asks the host,
@@ -1261,6 +1264,11 @@ function updateCamera(e, dt) {
   e.bobT = (e.bobT || 0) + (moving ? (sprinting ? 12.5 : 9) * dt : 0);
   e.bobK = lerp(e.bobK || 0, moving ? clamp(spd / WALK_SPEED, 0, 2) : 0, Math.min(1, 6 * dt));
   if (e.landK > 0) e.landK = Math.max(0, e.landK - dt * 4);
+  // a footstep at the bottom of every bob, on whatever is underfoot
+  if (e === G.player && moving) {
+    const beat = Math.floor(e.bobT / Math.PI);
+    if (beat !== e.stepBeat) { e.stepBeat = beat; Sfx.footstep(groundMaterial(e), sprinting); }
+  }
 
   // FOV eases into the aim rather than snapping — a hard cut every time you touch
   // the trigger is most of what "not smooth" feels like. A sprint opens it a touch.
@@ -1269,6 +1277,43 @@ function updateCamera(e, dt) {
   if (!e.ads && moving && sprinting) wantFov *= 1.05;
   if (e.fov === undefined) e.fov = wantFov;
   else e.fov += (wantFov - e.fov) * Math.min(1, 15 * dt);
+}
+
+// What is underfoot, for footsteps: a build piece's or prop's material, or -1 for the ground.
+const _gq = [];
+function groundMaterial(e) {
+  queryBoxes(e.pos[0] - 0.3, e.pos[1] - 0.25, e.pos[2] - 0.3, e.pos[0] + 0.3, e.pos[1] + 0.05, e.pos[2] + 0.3, _gq);
+  for (const c of _gq) if (c.ref && (c.kind === 'piece' || c.kind === 'prop')) return c.ref.mat;
+  return -1;
+}
+
+// Other people's footsteps, by distance walked, audible within 30 m — you can
+// hear someone coming up the stairs.
+function stepSound(e) {
+  const dx = e.pos[0] - (e.sx === undefined ? e.pos[0] : e.sx), dz = e.pos[2] - (e.sz === undefined ? e.pos[2] : e.sz);
+  e.sx = e.pos[0]; e.sz = e.pos[2];
+  const d = len2(dx, dz);
+  if (d > 1.5 || !e.grounded) return;         // a teleport or a spawn, not a stride
+  e.stepD = (e.stepD || 0) + d;
+  if (e.stepD < 2.1) return;
+  e.stepD = 0;
+  const p = G.player, d2p = dist2(e.pos[0], e.pos[2], p.pos[0], p.pos[2]);
+  if (d2p > 30 * 30 || d2p < 0.01) return;
+  Sfx.footstep(groundMaterial(e), len2(e.vel[0], e.vel[2]) > WALK_SPEED * 1.35, clamp(1 - Math.sqrt(d2p) / 30, 0, 1) * 0.8);
+}
+
+// Everything the looping ambience needs to know this frame (see Sfx.update).
+function audioState(dt) {
+  if (!Sfx.ctx) return;
+  const p = G.player, s = G.storm;
+  const playing = G.state === 'play' || G.state === 'drop';
+  let stormNear = 0, rush = 0;
+  if (playing && s && p) {
+    const d = Math.sqrt(dist2(p.pos[0], p.pos[2], s.cx, s.cz));
+    stormNear = clamp(1 - Math.abs(s.r - d) / 45, 0, 1);
+    if (G.state === 'drop') rush = clamp(-p.vel[1] / 42, 0, 1);
+  }
+  Sfx.update(dt, { playing, menu: G.state === 'menu', stormK: G.stormK || 0, stormNear, rush, lowK: G.lowK || 0, music: G.musicOn !== false });
 }
 
 // Camera offset from the bob and landing state — pure, so cameraState() stays pure.
@@ -2402,6 +2447,7 @@ function update(dt) {
       if (e === p) continue;
       if (e.remote) Net.interp(e, now);
       else if (e.alive) updateBot(e, dt);
+      if (e.alive) stepSound(e);
       if (e.muzzleT > 0) e.muzzleT -= dt;
       if (e.hurtT > 0) e.hurtT -= dt;
     }
@@ -2466,6 +2512,7 @@ function frame(now) {
     for (const e of G.ents) { if (!e.anim) updateAnim(e, dt); else e.anim.update(dt); }
     renderScene();
     drawHUD();
+    audioState(dt);
     Input.endFrame();
     return;
   }
@@ -2485,6 +2532,7 @@ function frame(now) {
   perf.sim += (t1 - t0 - perf.sim) * 0.05;
   perf.render += (t2 - t1 - perf.render) * 0.05;
   updateOverlays();
+  audioState(dt);
   Input.endFrame();
 }
 
@@ -2588,6 +2636,10 @@ function boot() {
   Assets.loadAll(MANIFEST);
 
   addEventListener('resize', () => R.resize());
+  // audio can only start on a gesture; the first click or key anywhere is enough
+  // for the menu ambience and pad to come up before DROP IN
+  addEventListener('pointerdown', () => Sfx.init(), { once: true });
+  addEventListener('keydown', () => Sfx.init(), { once: true });
   document.getElementById('playBtn').addEventListener('click', () => startGame());
   document.getElementById('againBtn').addEventListener('click', () => startGame());
   document.getElementById('specBtn').addEventListener('click', () => {

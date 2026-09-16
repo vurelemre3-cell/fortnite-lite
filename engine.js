@@ -1719,54 +1719,221 @@ const Input = {
 };
 
 /* -------------------------------- audio ------------------------------------ */
-// Tiny synth — no assets, everything is oscillators and one noise buffer.
+// Synth only — no assets: oscillators, one looping noise buffer and filters.
+// Three buses under the master: `bus` for one-shots, `amb` for the looping
+// ambience (wind, gusts, storm rumble, air rush) and `mus` for the menu pad.
+// update() runs every frame with what the game knows and steers the loops.
 
 const Sfx = {
-  ctx: null, noiseBuf: null, master: null, muted: false,
+  ctx: null, noiseBuf: null, master: null, bus: null, amb: null, mus: null, muted: false,
+  vol: { master: 0.5, sfx: 1, music: 0.35 },
+  _amb: null, _music: null,
   init() {
     if (this.ctx) { if (this.ctx.state === 'suspended') this.ctx.resume(); return; }
     const AC = window.AudioContext || window.webkitAudioContext;
     if (!AC) return;
-    this.ctx = new AC();
-    this.master = this.ctx.createGain();
-    this.master.gain.value = 0.5;
-    this.master.connect(this.ctx.destination);
-    const n = this.ctx.sampleRate * 0.5;
-    this.noiseBuf = this.ctx.createBuffer(1, n, this.ctx.sampleRate);
+    const c = this.ctx = new AC();
+    this.master = c.createGain(); this.master.gain.value = this.vol.master; this.master.connect(c.destination);
+    this.bus = c.createGain(); this.bus.gain.value = this.vol.sfx; this.bus.connect(this.master);
+    this.amb = c.createGain(); this.amb.gain.value = this.vol.sfx; this.amb.connect(this.master);
+    this.mus = c.createGain(); this.mus.gain.value = this.vol.music; this.mus.connect(this.master);
+    const n = c.sampleRate * 1.0;
+    this.noiseBuf = c.createBuffer(1, n, c.sampleRate);
     const d = this.noiseBuf.getChannelData(0);
     for (let i = 0; i < n; i++) d[i] = Math.random() * 2 - 1;
+    this._startAmbient();
   },
-  tone(freq, dur, type, gain, slide) {
-    if (!this.ctx || this.muted) return;
+  // Volumes 0..1 (Settings). Applied smoothly so a slider never clicks.
+  setVolume(master, sfx, music) {
+    if (master !== undefined) this.vol.master = master;
+    if (sfx !== undefined) this.vol.sfx = sfx;
+    if (music !== undefined) this.vol.music = music;
+    if (!this.ctx) return;
     const t = this.ctx.currentTime;
+    this.master.gain.setTargetAtTime(this.vol.master, t, 0.05);
+    this.bus.gain.setTargetAtTime(this.vol.sfx, t, 0.05);
+    this.amb.gain.setTargetAtTime(this.vol.sfx, t, 0.05);
+    this.mus.gain.setTargetAtTime(this.vol.music, t, 0.05);
+  },
+
+  /* ------------------------------ primitives ------------------------------ */
+  // `when` is seconds from now; both return nothing and never throw without a context.
+  tone(freq, dur, type, gain, slide, when) {
+    if (!this.ctx || this.muted) return;
+    const t = this.ctx.currentTime + (when || 0);
     const o = this.ctx.createOscillator(), g = this.ctx.createGain();
     o.type = type || 'square'; o.frequency.setValueAtTime(freq, t);
     if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(20, slide), t + dur);
     g.gain.setValueAtTime(gain, t);
     g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-    o.connect(g); g.connect(this.master); o.start(t); o.stop(t + dur + 0.02);
+    o.connect(g); g.connect(this.bus); o.start(t); o.stop(t + dur + 0.02);
   },
-  noise(dur, gain, freq, q) {
+  noise(dur, gain, freq, q, type, when) {
     if (!this.ctx || this.muted) return;
-    const t = this.ctx.currentTime;
+    const t = this.ctx.currentTime + (when || 0);
     const s = this.ctx.createBufferSource(); s.buffer = this.noiseBuf;
-    const f = this.ctx.createBiquadFilter(); f.type = 'bandpass';
+    s.playbackRate.value = 0.9 + Math.random() * 0.2;           // never the exact same burst twice
+    const f = this.ctx.createBiquadFilter(); f.type = type || 'bandpass';
     f.frequency.value = freq; f.Q.value = q || 1;
     const g = this.ctx.createGain();
     g.gain.setValueAtTime(gain, t);
     g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-    s.connect(f); f.connect(g); g.connect(this.master); s.start(t); s.stop(t + dur);
+    s.connect(f); f.connect(g); g.connect(this.bus); s.start(t); s.stop(t + dur);
   },
-  shoot(kind) {
-    if (kind === 'shotgun') { this.noise(0.28, 0.5, 700, 0.7); this.tone(120, 0.18, 'sawtooth', 0.25, 40); }
-    else if (kind === 'sniper') { this.noise(0.35, 0.45, 1200, 0.8); this.tone(200, 0.25, 'square', 0.2, 50); }
-    else { this.noise(0.09, 0.3, 1600, 1.2); this.tone(320, 0.06, 'square', 0.12, 120); }
+
+  /* ------------------------------- ambience ------------------------------- */
+  _startAmbient() {
+    const c = this.ctx;
+    const mk = (type, freq, q) => {
+      const s = c.createBufferSource(); s.buffer = this.noiseBuf; s.loop = true;
+      const f = c.createBiquadFilter(); f.type = type; f.frequency.value = freq; f.Q.value = q;
+      const g = c.createGain(); g.gain.value = 0;
+      s.connect(f); f.connect(g); g.connect(this.amb); s.start();
+      return { s, f, g };
+    };
+    this._amb = {
+      wind: mk('lowpass', 420, 0.5),     // the steady breeze
+      gust: mk('bandpass', 900, 0.8),    // whistling on top of it
+      storm: mk('lowpass', 140, 0.7),    // rumble inside and near the storm
+      rush: mk('highpass', 1200, 0.5),   // air past the ears in freefall / under the glider
+      t: 0, chirpT: 3, beatT: 0,
+    };
   },
-  hit() { this.tone(1500, 0.05, 'square', 0.16, 900); },
-  hurt() { this.noise(0.18, 0.3, 300, 0.6); },
-  build() { this.tone(240, 0.09, 'triangle', 0.2, 420); },
-  pickup() { this.tone(660, 0.07, 'triangle', 0.18); setTimeout(() => this.tone(990, 0.09, 'triangle', 0.16), 60); },
+  // st: { playing, menu, stormK 0..1 inside, stormNear 0..1 close to the edge,
+  //       rush 0..1 (fall speed), lowK 0..1 (low health), music bool }
+  update(dt, st) {
+    const a = this._amb;
+    if (!a || !this.ctx) return;
+    a.t += dt;
+    const now = this.ctx.currentTime;
+    const set = (g, v) => g.gain.setTargetAtTime(v, now, 0.3);
+    const on = st.playing ? 1 : (st.menu ? 0.45 : 0);
+    const gust = 0.5 + 0.5 * Math.sin(a.t * 0.37) * Math.sin(a.t * 0.11 + 1.3);
+    set(a.wind.g, on * 0.05 * (0.7 + 0.3 * gust));
+    a.wind.f.frequency.setTargetAtTime(380 + 240 * gust, now, 0.5);
+    set(a.gust.g, on * 0.014 * gust * gust);
+    set(a.storm.g, on * (st.stormK * 0.18 + st.stormNear * 0.07));
+    set(a.rush.g, st.rush * 0.14);
+    a.chirpT -= dt;
+    if (a.chirpT <= 0) {
+      a.chirpT = 2.5 + Math.random() * 7;
+      if ((st.playing || st.menu) && st.stormK < 0.3 && st.rush < 0.2) this.chirp();
+    }
+    a.beatT -= dt;
+    if (st.lowK > 0.05 && st.playing && a.beatT <= 0) { a.beatT = 0.95 - 0.45 * st.lowK; this.heartbeat(st.lowK); }
+    if (st.music && st.menu) { if (!this._music) this._startMusic(); }
+    else if (this._music) this._stopMusic();
+  },
+  chirp() {
+    const f = 2400 + Math.random() * 1400, n = 2 + ((Math.random() * 2) | 0);
+    for (let i = 0; i < n; i++) this.tone(f * (1 + 0.1 * (i & 1)), 0.06, 'sine', 0.018, f * 1.35, i * 0.11);
+  },
+  heartbeat(k) {
+    this.tone(58, 0.12, 'sine', 0.22 * k, 40);
+    this.tone(52, 0.14, 'sine', 0.18 * k, 36, 0.16);
+  },
+
+  /* ------------------------------- menu pad ------------------------------- */
+  // Four slow chords of detuned saws through a low-pass, a bass under each and
+  // a soft arpeggio on top. Scheduled a chord at a time; stopped with a fade.
+  _startMusic() {
+    const c = this.ctx;
+    const chords = [[220, 261.6, 329.6], [174.6, 220, 261.6], [261.6, 329.6, 392], [196, 246.9, 293.7]];
+    const m = this._music = { i: 0, timer: 0, nodes: [], out: c.createGain() };
+    m.out.gain.value = 0; m.out.connect(this.mus);
+    m.out.gain.setTargetAtTime(1, c.currentTime, 1.5);
+    const lp = c.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 820; lp.Q.value = 0.6;
+    lp.connect(m.out); m.lp = lp;
+    const step = () => {
+      if (this._music !== m) return;
+      const t = c.currentTime + 0.05, dur = 4.2, ch = chords[m.i % chords.length];
+      for (const f of ch) for (const det of [-6, 6]) {
+        const o = c.createOscillator(), g = c.createGain();
+        o.type = 'sawtooth'; o.frequency.value = f; o.detune.value = det;
+        g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.028, t + 0.8);
+        g.gain.setValueAtTime(0.028, t + dur - 0.9); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+        o.connect(g); g.connect(lp); o.start(t); o.stop(t + dur + 0.05);
+      }
+      const b = c.createOscillator(), bg = c.createGain();
+      b.type = 'sine'; b.frequency.value = ch[0] / 2;
+      bg.gain.setValueAtTime(0.0001, t); bg.gain.exponentialRampToValueAtTime(0.06, t + 0.4);
+      bg.gain.setValueAtTime(0.06, t + dur - 0.6); bg.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      b.connect(bg); bg.connect(m.out); b.start(t); b.stop(t + dur + 0.05);
+      for (let k = 0; k < 8; k++) {
+        const o = c.createOscillator(), g = c.createGain();
+        o.type = 'triangle'; o.frequency.value = ch[k % 3] * 2;
+        const at = t + k * (dur / 8);
+        g.gain.setValueAtTime(0.0001, at); g.gain.exponentialRampToValueAtTime(0.02, at + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001, at + 0.45);
+        o.connect(g); g.connect(m.out); o.start(at); o.stop(at + 0.5);
+      }
+      m.i++;
+      m.timer = setTimeout(step, dur * 1000 - 150);
+    };
+    step();
+  },
+  _stopMusic() {
+    const m = this._music;
+    if (!m) return;
+    this._music = null;
+    clearTimeout(m.timer);
+    m.out.gain.setTargetAtTime(0, this.ctx.currentTime, 0.4);
+    setTimeout(() => m.out.disconnect(), 2500);
+  },
+
+  /* ------------------------------- one-shots ------------------------------ */
+  // Every gun is a filtered noise crack, a low body thump and a click; the
+  // pump and bolt get a longer, deeper report. `vol` is the distance falloff.
+  shoot(kind, vol) {
+    const v = vol === undefined ? 1 : vol;
+    if (kind === 'shotgun') { this.noise(0.32, 0.55 * v, 600, 0.6); this.noise(0.12, 0.35 * v, 3000, 0.7); this.tone(95, 0.22, 'sine', 0.35 * v, 35); }
+    else if (kind === 'sniper') { this.noise(0.42, 0.5 * v, 1000, 0.7); this.tone(160, 0.3, 'square', 0.14 * v, 40); this.tone(60, 0.35, 'sine', 0.3 * v, 30); }
+    else if (kind === 'pistol') { this.noise(0.1, 0.32 * v, 1800, 1.0); this.tone(240, 0.07, 'square', 0.09 * v, 90); this.tone(80, 0.09, 'sine', 0.2 * v, 40); }
+    else if (kind === 'smg') { this.noise(0.07, 0.26 * v, 2200, 1.2); this.tone(300, 0.05, 'square', 0.08 * v, 140); this.tone(100, 0.06, 'sine', 0.12 * v, 50); }
+    else { this.noise(0.1, 0.32 * v, 1500, 1.1); this.tone(280, 0.06, 'square', 0.1 * v, 110); this.tone(90, 0.1, 'sine', 0.2 * v, 40); }
+  },
+  // Hit tick: higher for a headshot, a glassy crack when the shield breaks.
+  hit(head, shieldBreak) {
+    if (shieldBreak) { this.noise(0.16, 0.22, 3400, 3); this.tone(1900, 0.12, 'triangle', 0.12, 700); return; }
+    this.tone(head ? 1900 : 1500, 0.05, 'square', 0.16, head ? 1300 : 900);
+    if (head) this.tone(2400, 0.06, 'triangle', 0.08, 1800, 0.03);
+  },
+  hurt() { this.noise(0.18, 0.3, 300, 0.6); this.tone(120, 0.12, 'sine', 0.12, 60); },
+  // Mag out, mag in, bolt — spaced across the weapon's reload time.
+  reload(dur) {
+    const d = dur || 2;
+    this.tone(1400, 0.03, 'square', 0.05, 600);
+    this.noise(0.05, 0.12, 2400, 2, 'bandpass', Math.min(0.35, d * 0.25));
+    this.tone(900, 0.04, 'square', 0.07, 1300, Math.max(0.3, d - 0.18));
+    this.noise(0.04, 0.1, 3000, 2, 'bandpass', Math.max(0.32, d - 0.16));
+  },
+  build() { this.tone(240, 0.09, 'triangle', 0.2, 420); this.noise(0.08, 0.12, 900, 0.8); this.tone(70, 0.12, 'sine', 0.16, 40); },
+  pickup() { this.tone(660, 0.07, 'triangle', 0.18); this.tone(990, 0.09, 'triangle', 0.16, undefined, 0.06); },
   swing() { this.noise(0.13, 0.18, 900, 1.5); },
-  elim() { this.tone(180, 0.5, 'sawtooth', 0.2, 60); },
-  win() { [523, 659, 784, 1047].forEach((f, i) => setTimeout(() => this.tone(f, 0.32, 'triangle', 0.2), i * 130)); }
+  // Pickaxe on a material: wood knocks, brick cracks, metal rings.
+  harvest(mat, vol) {
+    const v = vol === undefined ? 1 : vol;
+    if (mat === 0) { this.noise(0.12, 0.2 * v, 700, 1); this.tone(130, 0.08, 'sine', 0.15 * v, 70); }
+    else if (mat === 1) { this.noise(0.1, 0.24 * v, 2200, 0.8); this.tone(180, 0.05, 'square', 0.05 * v, 90); }
+    else { this.tone(1100, 0.16, 'triangle', 0.14 * v, 900); this.noise(0.08, 0.15 * v, 3000, 2); }
+  },
+  // Footsteps by what is underfoot: grass is soft, wood hollow, brick crisp, metal rings a little.
+  footstep(mat, sprint, vol) {
+    const v = (vol === undefined ? 1 : vol) * (sprint ? 0.13 : 0.09);
+    if (mat === 0) { this.noise(0.09, v * 1.1, 500 + Math.random() * 120, 1.2); this.tone(110 + Math.random() * 20, 0.07, 'sine', v * 0.5, 60); }
+    else if (mat === 1) { this.noise(0.07, v, 1400 + Math.random() * 300, 0.9); }
+    else if (mat === 2) { this.noise(0.08, v * 0.8, 2300 + Math.random() * 400, 2.5); this.tone(900 + Math.random() * 120, 0.08, 'triangle', v * 0.25, 500); }
+    else { this.noise(0.11, v * 0.9, 300 + Math.random() * 150, 0.6, 'lowpass'); }
+  },
+  land(k) { this.noise(0.18, 0.18 * k, 220, 0.6, 'lowpass'); this.tone(85, 0.16, 'sine', 0.22 * k, 40); },
+  chest() { [660, 880, 1100, 1320].forEach((f, i) => this.tone(f, 0.18, 'triangle', 0.11, undefined, i * 0.07)); },
+  ui(kind) {
+    if (kind === 'open') this.tone(700, 0.06, 'triangle', 0.06, 900);
+    else if (kind === 'back') this.tone(520, 0.06, 'triangle', 0.06, 380);
+    else this.tone(1800, 0.03, 'square', 0.04, 1200);
+  },
+  kill() { this.tone(880, 0.12, 'triangle', 0.2); this.tone(1320, 0.28, 'triangle', 0.18, undefined, 0.1); this.noise(0.2, 0.12, 2500, 1, 'bandpass', 0.1); },
+  warn() { this.tone(220, 0.35, 'sawtooth', 0.1, 180); this.tone(165, 0.5, 'sawtooth', 0.1, 140, 0.32); },
+  elim() { this.tone(180, 0.5, 'sawtooth', 0.2, 60); this.noise(0.4, 0.2, 400, 0.5, 'lowpass'); },
+  win() { [523, 659, 784, 1047].forEach((f, i) => this.tone(f, 0.32, 'triangle', 0.2, undefined, i * 0.13)); }
 };
