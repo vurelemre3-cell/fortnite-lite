@@ -1570,9 +1570,21 @@ const Input = {
   padLook: 3.15,                  // look speed, rad/sec at full deflection
   padDead: 0.16,
 
+  // Capture the mouse. requestPointerLock() hands back a promise in current
+  // browsers, and it rejects — as an uncaught error in the console — when there
+  // was no gesture behind it or the user just pressed Esc; a pad never wants it.
+  lock(canvas) {
+    if (this.padActive || document.pointerLockElement === canvas) return;
+    try { const r = canvas.requestPointerLock(); if (r && r.catch) r.catch(() => { /* not now */ }); } catch (e) { /* unsupported */ }
+  },
+
   attach(canvas) {
     addEventListener('keydown', e => {
       if (e.repeat) return;
+      const t = e.target;
+      // typing a name or a lobby code is not playing: no key tracking, and no
+      // swallowing the space bar they are trying to type
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA')) return;
       const k = e.code;
       this.keys[k] = true; this.pressed[k] = true;
       if (['Space', 'Tab', 'F1', 'F2', 'F3', 'F4'].includes(k)) e.preventDefault();
@@ -1583,7 +1595,7 @@ const Input = {
       this.mouse = [false, false, false]; this.mouseRaw = [false, false, false];
     });
     canvas.addEventListener('mousedown', e => {
-      if (!this.locked && !this.padActive) { canvas.requestPointerLock(); return; }
+      if (!this.locked && !this.padActive) { this.lock(canvas); return; }
       this.mouseRaw[e.button] = true;
       this.mouse[e.button] = true; this.clicked[e.button] = true;
     });

@@ -451,10 +451,22 @@ function addPiece(type, gx, gy, gz, rot, mat, owner) {
   return p;
 }
 
+// Loot lying on a piece or prop that has just gone falls again instead of
+// hovering where the surface used to be.
+function wakeLootOn(c) {
+  if (!c) return;
+  for (const l of World.loot) {
+    if (!l.rest || l.x < c.minx || l.x > c.maxx || l.z < c.minz || l.z > c.maxz) continue;
+    if (l.y < c.miny - 0.1 || l.y > c.maxy + 0.3) continue;
+    l.rest = false;
+  }
+}
+
 function removePiece(p, silent) {
   if (!World.pieces.has(p.key)) return;
   World.pieces.delete(p.key);
   p.col.dead = true;
+  wakeLootOn(p.col);
   for (const k of p.keys) {
     const s = World.keyMap.get(k);
     if (s) { s.delete(p); if (!s.size) World.keyMap.delete(k); }
@@ -618,7 +630,7 @@ function damageProp(p, dmg) {
   return 15;
 }
 function destroyProp(p) {
-  if (p.col) p.col.dead = true;
+  if (p.col) { p.col.dead = true; wakeLootOn(p.col); }
   const i = World.props.indexOf(p);
   if (i >= 0) World.props.splice(i, 1);
   World.propById.delete(p.id);
@@ -699,9 +711,13 @@ function randomLootAt(x, y, z, minRar) {
 
 /* ------------------------------- map building ------------------------------ */
 
+// Storeys a prefab can occupy: plateaus sit anywhere in the terrain's ±25 m
+// (gy -7..6) and a house is up to three storeys on top of that. Scanning only
+// -1..4 here let houses on high plateaus overlap and props land inside them.
+const PREFAB_GY_MIN = -8, PREFAB_GY_MAX = 12;
 function tileHasPiece(gx, gz) {
-  for (const t of ['f', 'r', 'c']) for (let gy = -1; gy <= 4; gy++) if (World.pieces.has(`${t}|${gx}|${gy}|${gz}`)) return true;
-  for (let gy = -1; gy <= 4; gy++) {
+  for (const t of ['f', 'r', 'c']) for (let gy = PREFAB_GY_MIN; gy <= PREFAB_GY_MAX; gy++) if (World.pieces.has(`${t}|${gx}|${gy}|${gz}`)) return true;
+  for (let gy = PREFAB_GY_MIN; gy <= PREFAB_GY_MAX; gy++) {
     if (World.pieces.has(`w|${gx}|${gy}|${gz}|0`) || World.pieces.has(`w|${gx}|${gy}|${gz}|3`) ||
       World.pieces.has(`w|${gx}|${gy}|${gz + 1}|0`) || World.pieces.has(`w|${gx + 1}|${gy}|${gz}|3`)) return true;
   }

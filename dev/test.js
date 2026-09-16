@@ -251,5 +251,103 @@ console.log('8. player push: build on yourself and get shoved clear, never burie
   ok(e.onRamp && e.pos[1] > 3.0, `walked up it from the low end to y=${e.pos[1].toFixed(2)}`);
 }
 
+console.log('9. inventory: switching slots cancels the reload / heal in progress instead of finishing it on the wrong item');
+{
+  flatWorld();
+  const e = spawn(2, 2);
+  e.inv[1] = { id: 'ar', rar: 2, mag: 0 }; e.inv[2] = { id: 'shield', rar: 2, mag: 0 }; e.ammo.medium = 60; e.slot = 1;
+  startReload(e);
+  ok(e.reloadT > 0, 'reload started on the empty rifle');
+  cycleSlot(e, 1);                                       // wheel to the shield potion
+  ok(e.slot === 2 && e.reloadT === 0, `wheeling to the shield cancels the reload (slot ${e.slot}, reloadT ${e.reloadT})`);
+  let threw = false;
+  try { finishReload(e); } catch (err) { threw = true; }
+  ok(!threw && e.inv[1].mag === 0 && e.ammo.medium === 60, 'a reload finishing on a potion neither throws nor hands out ammo');
+  e.slot = 1; startReload(e); e.slot = 2; finishReload(e);
+  ok(e.inv[1].mag === 0 && e.ammo.medium === 60, 'a reload timer that runs out on another item gives nothing away');
+  e.slot = 1; startReload(e); finishReload(e);
+  ok(e.inv[1].mag === 30 && e.ammo.medium === 30, 'the same reload on the rifle itself fills the magazine');
+  // a heal in progress, then a gun picked up into another slot
+  e.inv = [e.inv[0], { id: 'ar', rar: 2, mag: 30 }, null, { id: 'medkit', rar: 3, mag: 0 }, null];
+  e.slot = 3; e.hp = 40;
+  startUse(e);
+  ok(e.useT > 0 && e.useKind === 'medkit', 'medkit use started');
+  const l = spawnLoot('weapon', 2, 0.5, 2, { item: { id: 'pistol', rar: 1, mag: 16 } }); l.rest = true;
+  ok(takeLoot(e, l, false), 'picked a pistol up mid-heal');
+  ok(e.useT === 0 && e.inv[3] && e.inv[3].id === 'medkit' && e.inv[2] && e.inv[2].id === 'pistol' && e.hp === 40,
+    `the pickup cancels the heal: medkit kept, pistol kept, no free heal (inv ${e.inv.map(i => i ? i.id : '-').join(',')}, hp ${e.hp})`);
+  e.slot = 3; startUse(e); e.slot = 2; finishUse(e);     // slot changed under it (as a pickup used to do)
+  ok(e.hp === 100 && e.inv[2].id === 'pistol' && e.inv[3] === null, 'a finishing heal consumes the medkit it started on, never the slot held now');
+  e.inv[3] = { id: 'medkit', rar: 3, mag: 0 }; e.hp = 40; e.slot = 3; startUse(e); e.inv[3] = null; finishUse(e);
+  ok(e.hp === 40, 'a medkit that is gone by the time the timer ends heals nothing');
+  e.inv[3] = { id: 'medkit', rar: 3, mag: 0 }; e.slot = 3; startUse(e); finishUse(e);
+  ok(e.hp === 100 && e.inv[3] === null && e.slot === 3, 'a normal heal heals and consumes the medkit from its own slot');
+  e.inv[2] = { id: 'shield', rar: 2, mag: 0 }; e.slot = 2;
+  threw = false;
+  try { startReload(e); } catch (err) { threw = true; }
+  ok(!threw && e.reloadT === 0, 'reload asked for while holding a potion (the pad\'s X button) is a quiet no-op');
+}
+
+console.log('10. bots finish their drop after the player has landed — no glider left on a bot walking about');
+{
+  flatWorld();
+  spawn(50, 50);
+  const b = makeEntity(true, 'B', [1, 1, 1], 'char_knight');
+  b.id = 1000; b.pos[0] = 0; b.pos[2] = 0; b.pos[1] = 120; b.vel[1] = -2; b.landing = { x: 0, z: 0 };
+  G.ents.push(b);
+  G.state = 'drop';
+  for (let i = 0; i < 60 * 2; i++) updateBot(b, 1 / 60);
+  ok(b.glide && !b.landed, `bot is gliding in at y=${b.pos[1].toFixed(1)}`);
+  G.state = 'play';                                      // the player touched down first
+  for (let i = 0; i < 60 * 10; i++) updateBot(b, 1 / 60);
+  ok(b.landed && !b.glide && Math.abs(b.pos[1]) < 0.05, `bot landed properly afterwards (landed=${b.landed}, glide=${b.glide}, y=${b.pos[1].toFixed(2)})`);
+}
+
+console.log('11. map generation: houses on tall plateaus and in valleys are seen by the clash check');
+{
+  flatWorld();
+  buildHouse(10, 10, 2, 2, 2, MAT_BRICK, 6);            // plateau six storeys up
+  ok(tileHasPiece(10, 10) && tileHasPiece(11, 11), 'a house on a +24 m plateau is seen by tileHasPiece');
+  World.pieces.clear(); World.keyMap.clear();
+  buildHouse(10, 10, 2, 2, 1, MAT_WOOD, -5);
+  ok(tileHasPiece(10, 10), 'and one in a -20 m valley');
+}
+
+console.log('12. loot resting on a floor drops when the floor is shot out');
+{
+  flatWorld();
+  spawn(50, 50);
+  addPiece('floor', 0, 2, 0, 0, MAT_WOOD, null);         // slab at y = 8
+  const l = spawnLoot('ammo', 2, 20, 2, { type: 'light', n: 10 });
+  for (let i = 0; i < 300; i++) updateLoot(1 / 60);
+  ok(l.rest && Math.abs(l.y - 8) < 0.01, `ammo settled on the floor at y=${l.y.toFixed(2)}`);
+  removePiece(World.pieces.get(pieceKey('floor', 0, 2, 0)));
+  for (let i = 0; i < 300; i++) updateLoot(1 / 60);
+  ok(l.rest && Math.abs(l.y) < 0.01, `and fell to the ground once the floor was gone (y=${l.y.toFixed(2)})`);
+}
+
+console.log('13. storm: after the last circle the HUD says so instead of counting down 9999 s');
+{
+  flatWorld();
+  spawn(0, 0);
+  newStorm();
+  for (let i = 0; i < 40 && G.storm.phase < STORM_PHASES.length; i++) { G.storm.timer = 0; updateStorm(1 / 60); }
+  ok(G.storm.phase === STORM_PHASES.length && G.storm.r === 0, `storm closed fully (phase ${G.storm.phase}, r ${G.storm.r})`);
+  ok(stormLabel(G.storm) === 'STORM CLOSED', `HUD label reads "${stormLabel(G.storm)}"`);
+  ok(!G.storm.shrinking && G.storm.timer > 1e6, 'nothing left to count down');
+  const ph = G.storm.phase;
+  for (let i = 0; i < 3; i++) { G.storm.timer = 0; updateStorm(1 / 60); }
+  ok(!G.storm.shrinking && G.storm.phase === ph && stormLabel(G.storm) === 'STORM CLOSED', 'and it stays closed whatever the timer does');
+}
+
+console.log('14. a solo match pauses while the mouse is not captured; a lobby match never does');
+{
+  G.state = 'play'; Input.locked = false; Input.padActive = false; Net.inMatch = false; global.__NOLOCK = undefined;
+  ok(!canRunNow(), 'solo: no pointer lock means the game waits');
+  Net.inMatch = true;
+  ok(canRunNow(), 'lobby: the simulation (and the host\'s snapshots) keep going');
+  Net.inMatch = false;
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

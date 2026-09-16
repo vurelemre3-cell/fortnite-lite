@@ -28,7 +28,7 @@ const TYPES = {
   '.glb': 'model/gltf-binary', '.gltf': 'model/gltf+json', '.bin': 'application/octet-stream',
   '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.md': 'text/plain',
 };
-const SOURCES = ['index.html', 'engine.js', 'models.js', 'world.js', 'game.js', 'net.js'];
+const SOURCES = ['index.html', 'engine.js', 'models.js', 'anim.js', 'textures.js', 'world.js', 'game.js', 'net.js'];
 
 /* ------------------------------- static ----------------------------------- */
 

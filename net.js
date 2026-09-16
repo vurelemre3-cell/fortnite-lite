@@ -102,7 +102,11 @@ const Net = {
       }
       case 'hostLeft':
         this.hostId = m.hostId;
-        if (this.inMatch) this.onEnd(null, 'HOST LEFT');
+        // The match lived in the host's tab, so it is over. Leaving inMatch set
+        // used to make whoever inherited the lobby "host" a dead match at once:
+        // snapshots of a world it never had authority over, hit and loot requests
+        // answered from stale state.
+        if (this.inMatch) { this.onEnd(null, 'HOST LEFT'); this.inMatch = false; this.pendingTake.clear(); }
         if (this.ui) this.ui.render();
         break;
       case 'err': if (this.ui) this.ui.err(m.msg); break;
@@ -442,7 +446,9 @@ function lobbyUI(net) {
     bots() { return $('botsChk').checked; },
     render() {
       $('roomCode').textContent = net.code;
-      const link = location.origin + location.pathname + '?join=' + net.code;
+      // a statically hosted page reached its relay through ?server= — the invite has to carry it too
+      const srv = new URLSearchParams(location.search).get('server');
+      const link = location.origin + location.pathname + '?join=' + net.code + (srv ? '&server=' + encodeURIComponent(srv) : '');
       $('roomLink').textContent = link; $('roomLink').href = link;
       const list = $('playerList');
       list.innerHTML = '';
