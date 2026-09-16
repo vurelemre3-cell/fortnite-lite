@@ -41,7 +41,8 @@ const G = {
   ents: [], player: null,
   storm: null,
   tracers: [], dmgNums: [], feed: [], parts: [],
-  hitMark: 0, critMark: 0, elimFlash: 0, hurtFlash: 0,
+  hitMark: 0, critMark: 0, elimFlash: 0, elimName: '', hurtFlash: 0,
+  hurtDirs: [],             // where recent hits came from, for the damage direction arcs
   alive: 0, placement: 0,
   msg: '', msgT: 0,
   firstPerson: false,
@@ -103,6 +104,7 @@ function newMatch(setup) {
   World.authority = setup.authority !== false;
   World.ents = G.ents;
   G.ents.length = 0; G.tracers.length = 0; G.dmgNums.length = 0; G.feed.length = 0; G.parts.length = 0;
+  G.hurtDirs.length = 0; G.elimFlash = 0; G.hurtFlash = 0;
   G.spec = null;
   const pois = withSeed(setup.seed, generateWorld);
   if (R) {   // R is null in headless harnesses
@@ -258,8 +260,8 @@ function dealDamage(target, dmg, attacker, head) {
   playUpper(target, 'Hit_A', 0.45);
   if (attacker === G.player) {
     G.hitMark = 0.14; if (head) G.critMark = 0.2;
-    Sfx.hit();
-    pushDamage(target.pos[0], target.pos[1] + 1.8, target.pos[2], Math.round(dmg), head);
+    Sfx.hit(head, false);
+    pushDamage(target.pos[0], target.pos[1] + 1.8, target.pos[2], Math.round(dmg), head, target.shield > 0);
     Net.hit(target, dmg, head);
   }
 }
@@ -283,17 +285,29 @@ function dealPropDamage(p, dmg) {
 function applyDamage(target, dmg, attacker, head, byStorm) {
   if (!target.alive) return;
   let d = dmg;
+  const hadShield = target.shield > 0;
   if (target.shield > 0) { const s = Math.min(target.shield, d); target.shield -= s; d -= s; }
   target.hp -= d;
   target.hurtT = 0.25;
   if (!byStorm) playUpper(target, 'Hit_A', 0.45);
-  if (target === G.player) { G.hurtFlash = 0.35; Sfx.hurt(); }
+  if (attacker && attacker !== target && !byStorm) target.lastHitBy = attacker.id;   // the snapshot carries it to a client
+  if (target === G.player) {
+    G.hurtFlash = 0.35; Sfx.hurt();
+    if (attacker && attacker !== target && !byStorm) hurtFrom(attacker.pos[0], attacker.pos[2]);
+  }
   if (attacker === G.player) {
     G.hitMark = 0.14; if (head) G.critMark = 0.2;
-    Sfx.hit();
-    pushDamage(target.pos[0], target.pos[1] + 1.8, target.pos[2], Math.round(dmg), head);
+    Sfx.hit(head, hadShield && target.shield <= 0);
+    pushDamage(target.pos[0], target.pos[1] + 1.8, target.pos[2], Math.round(dmg), head, hadShield);
   }
   if (target.hp <= 0) eliminate(target, attacker, byStorm);
+}
+
+// A hit on the player from somewhere: remembered for a second so the HUD can
+// draw an arc toward the shooter.
+function hurtFrom(x, z) {
+  G.hurtDirs.push({ x, z, t: 1.1 });
+  if (G.hurtDirs.length > 6) G.hurtDirs.shift();
 }
 
 function eliminate(e, attacker, byStorm, placement) {
@@ -330,8 +344,7 @@ function eliminate(e, attacker, byStorm, placement) {
     Sfx.elim();
     if (document.pointerLockElement) document.exitPointerLock();
   } else if (attacker === G.player) {
-    G.elimFlash = 1.2; Sfx.elim();
-    say('ELIMINATED ' + e.name);
+    G.elimFlash = 1.7; G.elimName = e.name; Sfx.elim();
   }
   if (!World.authority) return;   // a client hears the result from the host
   if (G.state !== 'dead' && G.alive <= 1 && G.player.alive) {
@@ -342,8 +355,8 @@ function eliminate(e, attacker, byStorm, placement) {
   if (Net.hosting && G.alive <= 1) Net.end(G.ents.find(x => x.alive) || null);
 }
 
-function pushDamage(x, y, z, val, crit) {
-  G.dmgNums.push({ x, y, z, val, crit, t: 0, life: 0.9, ox: rnd(-0.4, 0.4) });
+function pushDamage(x, y, z, val, crit, shield) {
+  G.dmgNums.push({ x, y, z, val, crit, shield: !!shield, t: 0, life: 0.9, ox: rnd(-0.4, 0.4) });
   if (G.dmgNums.length > 40) G.dmgNums.shift();
 }
 function addFeed(a, b) {
@@ -602,9 +615,13 @@ function updatePlayer(e, dt) {
   e.vel[2] += (wishZ * speed - e.vel[2]) * Math.min(1, accel * dt);
   if (e.grounded && Input.down('Space')) { e.vel[1] = 9.4; e.grounded = false; }
   e.vel[1] -= 30 * dt;
-  const wasAir = !e.grounded;
+  const wasAir = !e.grounded, fallV = e.vel[1];
   moveEntity(e, dt);
-  if (wasAir && e.grounded && e.vel[1] <= 0) spawnParticles(e.pos[0], e.pos[1] + 0.1, e.pos[2], 5, [0.6, 0.55, 0.45], 1.8, 0.1, 0.35, 8);
+  if (wasAir && e.grounded && e.vel[1] <= 0) {
+    spawnParticles(e.pos[0], e.pos[1] + 0.1, e.pos[2], 5, [0.6, 0.55, 0.45], 1.8, 0.1, 0.35, 8);
+    e.landK = clamp(-fallV / 16, 0.25, 1);          // camera dip scaled by how hard you hit
+    if (Sfx.land) Sfx.land(e.landK);
+  }
 
   // ---- inventory / mode switching ----
   for (let i = 0; i < 5; i++) if (Input.hit('Digit' + (i + 1))) { e.slot = i; e.buildMode = false; e.reloadT = 0; e.useT = 0; }
@@ -832,7 +849,7 @@ function updateSkydive(e, dt, wishX, wishZ, isPlayer) {
   if (e.pos[1] <= land + 0.05) {
     e.pos[1] = land; e.vel[0] = e.vel[1] = e.vel[2] = 0; e.glide = false; e.grounded = true;
     spawnParticles(e.pos[0], e.pos[1] + 0.1, e.pos[2], 8, [0.6, 0.55, 0.45], 2.5, 0.12, 0.45, 8);
-    if (isPlayer) { G.state = 'play'; say('LOOT UP'); }
+    if (isPlayer) { G.state = 'play'; say('LOOT UP'); e.landK = 1; if (Sfx.land) Sfx.land(1); }
     else e.landed = true;
   }
 }
@@ -1235,22 +1252,46 @@ function updateCamera(e, dt) {
   // pull in instantly so the camera never clips through a wall, ease back out
   e.camDist = target < e.camDist ? target : e.camDist + (target - e.camDist) * Math.min(1, 7 * dt);
 
+  // View bob: a soft two-beat cycle while the feet are on the ground and moving,
+  // faster in a sprint, eased in and out so stopping never jolts. The landing
+  // dip is a short half-sine started by whatever put the feet down.
+  const spd = len2(e.vel[0], e.vel[2]);
+  const moving = e.grounded && spd > 1.5 && (G.state === 'play');
+  const sprinting = spd > WALK_SPEED * 1.35;
+  e.bobT = (e.bobT || 0) + (moving ? (sprinting ? 12.5 : 9) * dt : 0);
+  e.bobK = lerp(e.bobK || 0, moving ? clamp(spd / WALK_SPEED, 0, 2) : 0, Math.min(1, 6 * dt));
+  if (e.landK > 0) e.landK = Math.max(0, e.landK - dt * 4);
+
   // FOV eases into the aim rather than snapping — a hard cut every time you touch
-  // the trigger is most of what "not smooth" feels like
+  // the trigger is most of what "not smooth" feels like. A sprint opens it a touch.
   const it = curItem(e);
-  const wantFov = (e.ads && it && WEAPONS[it.id]) ? (WEAPONS[it.id].scope ? FOV.scope : FOV.ads) : FOV.base;
+  let wantFov = (e.ads && it && WEAPONS[it.id]) ? (WEAPONS[it.id].scope ? FOV.scope : FOV.ads) : FOV.base;
+  if (!e.ads && moving && sprinting) wantFov *= 1.05;
   if (e.fov === undefined) e.fov = wantFov;
   else e.fov += (wantFov - e.fov) * Math.min(1, 15 * dt);
 }
+
+// Camera offset from the bob and landing state — pure, so cameraState() stays pure.
+function camBob(e, out) {
+  const k = e.bobK || 0, t = e.bobT || 0;
+  const amp = G.firstPerson ? 0.05 : 0.024;
+  let y = -Math.abs(Math.sin(t)) * amp * k;
+  const x = Math.sin(t * 0.5) * amp * 0.7 * k;
+  if (e.landK > 0) y -= Math.sin(e.landK * Math.PI) * 0.26 * (G.firstPerson ? 1 : 0.7);
+  out[0] = x; out[1] = y;
+  return out;
+}
+const _bob = [0, 0];
 
 const CAM_BOOM = 4.6, CAM_ADS = 2.4;
 
 function cameraState(e) {
   const d = dirFrom(e.yaw, e.pitch, _camv);
-  const ex = e.pos[0], ez = e.pos[2];
-  const ey = e.camY === undefined ? entEye(e) : e.camY;
-  if (G.firstPerson) return { x: ex, y: ey, z: ez };
   const rx = Math.cos(e.yaw), rz = -Math.sin(e.yaw);
+  const bob = camBob(e, _bob);
+  const ex = e.pos[0] + rx * bob[0], ez = e.pos[2] + rz * bob[0];
+  const ey = (e.camY === undefined ? entEye(e) : e.camY) + bob[1];
+  if (G.firstPerson) return { x: ex, y: ey, z: ez };
   const off = e.ads ? 0.55 : 0.95;
   const want = e.camDist === undefined ? (e.ads ? CAM_ADS : CAM_BOOM) : e.camDist;
   const bx = ex + rx * off, by = ey + 0.5, bz = ez + rz * off;
@@ -1825,14 +1866,8 @@ function drawHUD() {
       hud.fillText(G.msg, W / 2, H * 0.18);
       hud.globalAlpha = 1;
     }
-    if (G.elimFlash > 0) {
-      hud.globalAlpha = clamp(G.elimFlash, 0, 1);
-      hud.font = '900 36px system-ui, sans-serif'; hud.textAlign = 'center';
-      hud.fillStyle = '#ffdd55'; hud.strokeStyle = 'rgba(0,0,0,.6)'; hud.lineWidth = 5;
-      hud.strokeText('ELIMINATED', W / 2, H * 0.30);
-      hud.fillText('ELIMINATED', W / 2, H * 0.30);
-      hud.globalAlpha = 1;
-    }
+    if (G.elimFlash > 0) drawElimBanner(W, H);
+    if (p.alive && G.hurtDirs.length) drawHurtDirs(W, H);
   }
 
   if (G.state === 'drop') {
@@ -1850,6 +1885,50 @@ function drawHUD() {
     hud.font = '700 26px system-ui, sans-serif'; hud.textAlign = 'center'; hud.fillStyle = '#fff';
     hud.fillText('CLICK TO RESUME', W / 2, H / 2);
   }
+}
+
+// "ELIMINATED <name>" with the running count: punches in over the first tenth
+// of a second, holds, then fades out.
+function drawElimBanner(W, H) {
+  const life = 1.7, age = life - G.elimFlash;
+  const pop = 1 + 0.35 * Math.max(0, 1 - age / 0.12);
+  hud.save();
+  hud.globalAlpha = clamp(G.elimFlash * 1.6, 0, 1);
+  hud.translate(W / 2, H * 0.27);
+  hud.scale(pop, pop);
+  hud.textAlign = 'center';
+  hud.font = '900 34px system-ui, sans-serif';
+  const title = 'ELIMINATED ' + (G.elimName || '').toUpperCase();
+  const w = hud.measureText(title).width + 60;
+  hud.fillStyle = 'rgba(0,0,0,.42)'; hud.fillRect(-w / 2, -26, w, 52);
+  hud.fillStyle = '#ffd24a'; hud.fillRect(-w / 2, 24, w, 3);
+  hud.fillStyle = '#ffdd55'; hud.strokeStyle = 'rgba(0,0,0,.6)'; hud.lineWidth = 5;
+  hud.strokeText(title, 0, -2); hud.fillText(title, 0, -2);
+  hud.font = '700 13px system-ui, sans-serif'; hud.fillStyle = 'rgba(255,255,255,.85)';
+  const k = G.player.kills;
+  hud.fillText(k + ' ELIMINATION' + (k === 1 ? '' : 'S'), 0, 40);
+  hud.restore();
+}
+
+// Red arcs around the crosshair pointing at whoever hit you, fading over a second.
+function drawHurtDirs(W, H) {
+  const p = G.player, cx = W / 2, cy = H / 2, r = 92;
+  hud.lineCap = 'round';
+  for (const h of G.hurtDirs) {
+    // yaw grows turning left, so a positive delta is an attacker on the left;
+    // the canvas rotates clockwise, hence the sign flip
+    const a = -angleDelta(p.yaw, Math.atan2(-(h.x - p.pos[0]), -(h.z - p.pos[2])));
+    hud.save();
+    hud.translate(cx, cy); hud.rotate(a);
+    hud.globalAlpha = clamp(h.t, 0, 1) * 0.9;
+    hud.strokeStyle = 'rgba(0,0,0,.5)'; hud.lineWidth = 10;
+    hud.beginPath(); hud.arc(0, 0, r, -Math.PI / 2 - 0.4, -Math.PI / 2 + 0.4); hud.stroke();
+    hud.strokeStyle = '#ff4040'; hud.lineWidth = 6;
+    hud.beginPath(); hud.arc(0, 0, r, -Math.PI / 2 - 0.4, -Math.PI / 2 + 0.4); hud.stroke();
+    hud.restore();
+  }
+  hud.lineCap = 'butt';
+  hud.globalAlpha = 1;
 }
 
 // Frame-time readout (Settings → show performance, or FN.perf(true)): frame
@@ -2289,8 +2368,10 @@ function drawDamageNumbers() {
     if (!projectPoint(R.vp, d.x + d.ox, d.y + d.t * 1.6, d.z, W, H, _scr)) continue;
     const a = clamp(1 - d.t / d.life, 0, 1);
     hud.globalAlpha = a;
-    hud.font = (d.crit ? '800 26px ' : '700 20px ') + 'system-ui, sans-serif';
-    hud.fillStyle = d.crit ? '#ffd24a' : '#fff';
+    // a pop on arrival; blue for shield damage, gold for a headshot, white for health
+    const pop = 1 + 0.45 * Math.max(0, 1 - d.t / 0.1);
+    hud.font = (d.crit ? '800 ' + (26 * pop).toFixed(1) + 'px ' : '700 ' + (20 * pop).toFixed(1) + 'px ') + 'system-ui, sans-serif';
+    hud.fillStyle = d.crit ? '#ffd24a' : d.shield ? '#5fc4ff' : '#fff';
     hud.strokeStyle = 'rgba(0,0,0,.7)'; hud.lineWidth = 3;
     hud.strokeText(d.val, _scr[0], _scr[1]);
     hud.fillText(d.val, _scr[0], _scr[1]);
@@ -2350,6 +2431,7 @@ function update(dt) {
   for (let i = G.tracers.length - 1; i >= 0; i--) { G.tracers[i].t -= dt; if (G.tracers[i].t <= 0) G.tracers.splice(i, 1); }
   for (let i = G.dmgNums.length - 1; i >= 0; i--) { G.dmgNums[i].t += dt; if (G.dmgNums[i].t >= G.dmgNums[i].life) G.dmgNums.splice(i, 1); }
   for (let i = G.feed.length - 1; i >= 0; i--) { G.feed[i].t -= dt; if (G.feed[i].t <= 0) G.feed.splice(i, 1); }
+  for (let i = G.hurtDirs.length - 1; i >= 0; i--) { G.hurtDirs[i].t -= dt; if (G.hurtDirs[i].t <= 0) G.hurtDirs.splice(i, 1); }
   for (let i = World.flashing.length - 1; i >= 0; i--) {
     const f = World.flashing[i];
     f.hitT -= dt;
