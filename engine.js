@@ -325,6 +325,21 @@ void main(){
   gl_Position = uVP * wp;
 }`;
 
+// Tone mapping, shared by every shader that writes a final colour (materials,
+// terrain, sky). Colour in this game is authored in display space, so this is
+// not a linear-light film curve: it is the identity up to the knee and a soft
+// exponential shoulder above it, which is what lets sun-lit faces, the hit
+// flash (tints > 1) and the sun's glow roll off into white instead of clipping.
+// uExposure scales everything first.
+const GLSL_TONEMAP = `
+uniform float uExposure;
+vec3 tonemap(vec3 c) {
+  c *= uExposure;
+  const float K = 0.72;
+  vec3 hi = max(c - K, 0.0);
+  return min(c, K) + (1.0 - K) * (1.0 - exp(-hi * (1.6 / (1.0 - K))));
+}`;
+
 // Shared lighting: one warm sun with a PCF shadow map, hemispheric ambient
 // (sky above, bounce below), a small Blinn highlight, and distance fog toward
 // the horizon colour. Alpha < 1 renders unlit — storm wall, build ghost, beams.
@@ -333,10 +348,11 @@ precision highp float;
 precision highp sampler2DShadow;
 in vec3 vN; in vec3 vWP; in vec4 vC; in vec2 vUV;
 uniform vec3 uCam; uniform vec3 uSunDir; uniform vec3 uSunCol; uniform vec3 uSkyCol; uniform vec3 uGndCol;
-uniform vec3 uFogCol; uniform vec2 uFogP;
+uniform vec3 uFogCol; uniform vec3 uFogSun; uniform vec2 uFogP;
 uniform mat4 uShadowVP; uniform sampler2DShadow uShadow; uniform float uShadowTexel; uniform float uShadowOn;
 uniform float uSpec;
 out vec4 outColor;
+` + GLSL_TONEMAP + `
 
 float shadowAt(vec3 wp, vec3 n, float ndl) {
   if (uShadowOn < 0.5) return 1.0;
@@ -360,11 +376,16 @@ vec3 shade(vec3 albedo, vec3 n, float spec) {
   return albedo * (amb + uSunCol * ndl * sh) + uSunCol * sp;
 }
 
+// Aerial perspective: distance fog that goes warm and bright looking into the
+// sun (in-scatter) and stays cool away from it, then the shared tone map.
 vec3 fogged(vec3 col) {
-  float d = length(vWP - uCam);
+  vec3 dv = vWP - uCam;
+  float d = length(dv);
   float f = clamp((d - uFogP.x) * uFogP.y, 0.0, 1.0);
   f = f * f * (3.0 - 2.0 * f);
-  return mix(col, uFogCol, f * 0.93);
+  float sunAmt = pow(max(dot(dv / max(d, 0.001), uSunDir), 0.0), 6.0);
+  vec3 fogCol = mix(uFogCol, uFogSun, sunAmt);
+  return tonemap(mix(col, fogCol, f * 0.93));
 }`;
 
 const FS_MAIN = FS_LIT_HEAD + `
@@ -423,27 +444,34 @@ precision highp float;
 in vec2 vNdc;
 uniform vec3 uCamF; uniform vec3 uCamR; uniform vec3 uCamU; uniform float uTanH; uniform float uAspect;
 uniform vec3 uSunDir; uniform float uTime; uniform sampler2D uNoise;
-uniform vec3 uZenith; uniform vec3 uHorizon; uniform vec3 uGround; uniform vec3 uFogCol;
+uniform vec3 uZenith; uniform vec3 uHorizon; uniform vec3 uGround; uniform vec3 uFogCol; uniform vec3 uFogSun;
 out vec4 outColor;
+` + GLSL_TONEMAP + `
 float fbm(vec2 p){ float a = 0.5, s = 0.0; for (int i = 0; i < 4; i++){ s += texture(uNoise, p).r * a; p = p * 2.03 + 17.1; a *= 0.5; } return s; }
 void main(){
   vec3 ray = normalize(uCamF + uCamR * vNdc.x * uTanH * uAspect + uCamU * vNdc.y * uTanH);
   float t = ray.y;
-  vec3 col = t > 0.0 ? mix(uHorizon, uZenith, pow(t, 0.6)) : mix(uHorizon, uGround, clamp(-t * 5.0, 0.0, 1.0));
   float sd = max(dot(ray, uSunDir), 0.0);
-  col += vec3(1.0, 0.93, 0.80) * (pow(sd, 1400.0) * 1.4 + pow(sd, 10.0) * 0.16 + pow(sd, 2.0) * 0.05);
+  vec3 col = t > 0.0 ? mix(uHorizon, uZenith, pow(t, 0.55)) : mix(uHorizon, uGround, clamp(-t * 5.0, 0.0, 1.0));
+  // the sky warms toward the sun, most of all low on its side of the horizon
+  col = mix(col, vec3(0.99, 0.88, 0.72), pow(sd, 5.0) * 0.38 * (1.0 - smoothstep(0.0, 0.55, t)));
+  // sun disc, a tight corona and a wide soft glow
+  col += vec3(1.0, 0.94, 0.82) * (pow(sd, 2600.0) * 3.0 + pow(sd, 60.0) * 0.32 + pow(sd, 7.0) * 0.14 + pow(sd, 2.0) * 0.05);
   if (t > 0.01) {
     vec2 p = ray.xz / (t + 0.10);
     float n1 = fbm(p * 0.012 + uTime * 0.0022);
     float n2 = fbm(p * 0.030 + 5.0 - uTime * 0.0031);
     float c = smoothstep(0.47, 0.66, n1) * 0.95 + smoothstep(0.56, 0.76, n2) * 0.45;
     float fade = smoothstep(0.01, 0.22, t);
-    vec3 cloud = mix(vec3(0.86, 0.88, 0.94), vec3(1.0), smoothstep(0.55, 0.9, n1));
+    // shaded undersides, bright tops, and a warm rim on the sun's side
+    vec3 cloud = mix(vec3(0.72, 0.75, 0.84), vec3(1.04, 1.02, 1.0), smoothstep(0.50, 0.92, n1));
+    cloud += vec3(0.16, 0.10, 0.02) * pow(sd, 4.0);
     col = mix(col, cloud, clamp(c, 0.0, 1.0) * fade);
   }
   // haze toward the fog colour at the horizon so terrain fades into the sky
-  col = mix(uFogCol, col, smoothstep(-0.02, 0.10, t));
-  outColor = vec4(col, 1.0);
+  vec3 haze = mix(uFogCol, uFogSun, pow(sd, 6.0));
+  col = mix(haze, col, smoothstep(-0.02, 0.12, t));
+  outColor = vec4(tonemap(col), 1.0);
 }`;
 
 const VS_DEPTH_INST = `
@@ -463,6 +491,151 @@ void main(){
   gl_Position = uVP * uModel * sk * vec4(aPos, 1.0);
 }`;
 const FS_DEPTH = `precision mediump float; void main(){}`;
+
+/* ---------------------------- post-processing ------------------------------ */
+// The scene is drawn into an offscreen target (multisampled when the GPU has
+// it), resolved to a texture and finished by one full-screen pass: FXAA when
+// there was no MSAA, a quarter-res bloom of the brightest pixels, contrast and
+// saturation grading, the vignette (purple inside the storm), the hurt flash
+// and the low-health pulse. All of it is LDR — the tone map already ran in the
+// material shaders — so the buffers stay RGBA8 and cheap.
+
+const VS_FULL = `
+out vec2 vUv;
+void main(){
+  vec2 v[3] = vec2[3](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+  vUv = v[gl_VertexID] * 0.5 + 0.5;
+  gl_Position = vec4(v[gl_VertexID], 0.0, 1.0);
+}`;
+
+// Bright pass + 4-tap box downsample to the bloom buffer. The threshold is
+// soft so a sun-lit wall only just glows while the sun, the muzzle flash and a
+// hit flash bloom properly.
+const FS_BRIGHT = `
+precision mediump float;
+in vec2 vUv;
+uniform sampler2D uScene; uniform vec2 uInvRes; uniform float uThresh;
+out vec4 outColor;
+void main(){
+  vec3 c = texture(uScene, vUv + vec2(-1.0, -1.0) * uInvRes).rgb + texture(uScene, vUv + vec2(1.0, -1.0) * uInvRes).rgb
+         + texture(uScene, vUv + vec2(-1.0, 1.0) * uInvRes).rgb + texture(uScene, vUv + vec2(1.0, 1.0) * uInvRes).rgb;
+  c *= 0.25;
+  float l = dot(c, vec3(0.299, 0.587, 0.114));
+  outColor = vec4(c * smoothstep(uThresh, 1.0, l), 1.0);
+}`;
+
+// One direction of a separable 9-tap gaussian.
+const FS_BLUR = `
+precision mediump float;
+in vec2 vUv;
+uniform sampler2D uTex; uniform vec2 uDir;
+out vec4 outColor;
+void main(){
+  vec3 c = texture(uTex, vUv).rgb * 0.227;
+  c += (texture(uTex, vUv + uDir * 1.0).rgb + texture(uTex, vUv - uDir * 1.0).rgb) * 0.194;
+  c += (texture(uTex, vUv + uDir * 2.0).rgb + texture(uTex, vUv - uDir * 2.0).rgb) * 0.121;
+  c += (texture(uTex, vUv + uDir * 3.0).rgb + texture(uTex, vUv - uDir * 3.0).rgb) * 0.054;
+  c += (texture(uTex, vUv + uDir * 4.0).rgb + texture(uTex, vUv - uDir * 4.0).rgb) * 0.016;
+  outColor = vec4(c, 1.0);
+}`;
+
+const FS_POST = `
+precision highp float;
+in vec2 vUv;
+uniform sampler2D uScene; uniform sampler2D uBloom;
+uniform vec2 uInvRes; uniform float uAspect;
+uniform float uFxaa; uniform float uBloomK;
+uniform vec4 uFx;      // x vignette strength, y storm (0..1), z hurt flash, w low-health pulse
+uniform vec3 uGrade;   // contrast, saturation, lift
+out vec4 outColor;
+
+// FXAA 3.11-style edge search (12 steps) — only runs when the scene target had
+// no multisampling to do the job.
+const float EDGE_MIN = 0.0312, EDGE_MAX = 0.125, SUBPIX = 0.75;
+float luma(vec3 rgb){ return sqrt(dot(rgb, vec3(0.299, 0.587, 0.114))); }
+vec3 fxaa(vec2 uv) {
+  vec3 colC = texture(uScene, uv).rgb;
+  float lC = luma(colC);
+  float lD = luma(textureOffset(uScene, uv, ivec2(0, -1)).rgb);
+  float lU = luma(textureOffset(uScene, uv, ivec2(0, 1)).rgb);
+  float lL = luma(textureOffset(uScene, uv, ivec2(-1, 0)).rgb);
+  float lR = luma(textureOffset(uScene, uv, ivec2(1, 0)).rgb);
+  float lMin = min(lC, min(min(lD, lU), min(lL, lR)));
+  float lMax = max(lC, max(max(lD, lU), max(lL, lR)));
+  float range = lMax - lMin;
+  if (range < max(EDGE_MIN, lMax * EDGE_MAX)) return colC;
+  float lDL = luma(textureOffset(uScene, uv, ivec2(-1, -1)).rgb);
+  float lUR = luma(textureOffset(uScene, uv, ivec2(1, 1)).rgb);
+  float lUL = luma(textureOffset(uScene, uv, ivec2(-1, 1)).rgb);
+  float lDR = luma(textureOffset(uScene, uv, ivec2(1, -1)).rgb);
+  float lDU = lD + lU, lLR = lL + lR;
+  float lLC = lDL + lUL, lDC = lDL + lDR, lRC = lDR + lUR, lUC = lUR + lUL;
+  float edgeH = abs(-2.0 * lL + lLC) + abs(-2.0 * lC + lDU) * 2.0 + abs(-2.0 * lR + lRC);
+  float edgeV = abs(-2.0 * lU + lUC) + abs(-2.0 * lC + lLR) * 2.0 + abs(-2.0 * lD + lDC);
+  bool horiz = edgeH >= edgeV;
+  float l1 = horiz ? lD : lL, l2 = horiz ? lU : lR;
+  float g1 = l1 - lC, g2 = l2 - lC;
+  bool steep1 = abs(g1) >= abs(g2);
+  float gScaled = 0.25 * max(abs(g1), abs(g2));
+  float stepLen = horiz ? uInvRes.y : uInvRes.x;
+  float lAvg;
+  if (steep1) { stepLen = -stepLen; lAvg = 0.5 * (l1 + lC); } else lAvg = 0.5 * (l2 + lC);
+  vec2 cur = uv;
+  if (horiz) cur.y += stepLen * 0.5; else cur.x += stepLen * 0.5;
+  vec2 off = horiz ? vec2(uInvRes.x, 0.0) : vec2(0.0, uInvRes.y);
+  vec2 uv1 = cur - off, uv2 = cur + off;
+  float e1 = luma(texture(uScene, uv1).rgb) - lAvg, e2 = luma(texture(uScene, uv2).rgb) - lAvg;
+  bool r1 = abs(e1) >= gScaled, r2 = abs(e2) >= gScaled;
+  if (!r1) uv1 -= off;
+  if (!r2) uv2 += off;
+  if (!(r1 && r2)) {
+    for (int i = 2; i < 12; i++) {
+      if (!r1) e1 = luma(texture(uScene, uv1).rgb) - lAvg;
+      if (!r2) e2 = luma(texture(uScene, uv2).rgb) - lAvg;
+      r1 = abs(e1) >= gScaled; r2 = abs(e2) >= gScaled;
+      float q = i < 5 ? 1.0 : (i < 10 ? 2.0 : 4.0);
+      if (!r1) uv1 -= off * q;
+      if (!r2) uv2 += off * q;
+      if (r1 && r2) break;
+    }
+  }
+  float d1 = horiz ? (uv.x - uv1.x) : (uv.y - uv1.y);
+  float d2 = horiz ? (uv2.x - uv.x) : (uv2.y - uv.y);
+  bool dir1 = d1 < d2;
+  float dFinal = min(d1, d2);
+  float thick = d1 + d2;
+  float pixOff = -dFinal / thick + 0.5;
+  bool cSmaller = lC < lAvg;
+  bool correct = ((dir1 ? e1 : e2) < 0.0) != cSmaller;
+  float finalOff = correct ? pixOff : 0.0;
+  float lAll = (1.0 / 12.0) * (2.0 * (lDU + lLR) + lLC + lRC);
+  float sp1 = clamp(abs(lAll - lC) / range, 0.0, 1.0);
+  float sp2 = (-2.0 * sp1 + 3.0) * sp1 * sp1;
+  finalOff = max(finalOff, sp2 * sp2 * SUBPIX);
+  vec2 fuv = uv;
+  if (horiz) fuv.y += finalOff * stepLen; else fuv.x += finalOff * stepLen;
+  return texture(uScene, fuv).rgb;
+}
+
+void main(){
+  vec3 col = uFxaa > 0.5 ? fxaa(vUv) : texture(uScene, vUv).rgb;
+  if (uBloomK > 0.0) col += texture(uBloom, vUv).rgb * uBloomK;
+  // grade: saturation about luma, contrast about mid grey, a touch of lift
+  float l = dot(col, vec3(0.299, 0.587, 0.114));
+  col = mix(vec3(l), col, uGrade.y);
+  col = (col - 0.5) * uGrade.x + 0.5 + uGrade.z;
+  // vignette: radial in height units, black normally, purple inside the storm
+  vec2 q = (vUv - 0.5) * vec2(uAspect, 1.0);
+  float v = smoothstep(0.42, 0.72 * max(uAspect, 1.0), length(q));
+  vec3 vcol = mix(vec3(0.0), vec3(0.35, 0.08, 0.59), uFx.y);
+  col = mix(col, vcol, v * mix(uFx.x, 0.6, uFx.y));
+  // low health: the colour drains and the edges throb red
+  col = mix(col, vec3(l * 0.85), uFx.w * 0.55);
+  col = mix(col, vec3(0.55, 0.03, 0.03), v * uFx.w * 0.6);
+  // hurt flash
+  col = mix(col, vec3(0.78, 0.08, 0.08), uFx.z * 0.35);
+  outColor = vec4(col, 1.0);
+}`;
 
 function growable(n) { return { a: new Float32Array(n * INST_STRIDE), n: 0 }; }
 function growNeed(b) {
@@ -518,9 +691,15 @@ class Renderer {
     this.skyCol = [0.50, 0.58, 0.72];
     this.gndCol = [0.30, 0.29, 0.25];
     this.fog = [0.70, 0.79, 0.90];
-    this.fogStart = 170; this.fogRange = 520;
+    this.fogSun = [0.99, 0.90, 0.76];         // what the fog turns into looking toward the sun
+    this.fogStart = 150; this.fogRange = 540;
     this.zenith = [0.22, 0.46, 0.86]; this.horizon = [0.74, 0.84, 0.95]; this.ground = [0.55, 0.62, 0.70];
     this.shadowsOn = true; this.time = 0;
+    this.exposure = 1.0;
+    // post-process controls the game writes each frame: see FS_POST
+    this.fx = new Float32Array([0.32, 0, 0, 0]);          // vignette, storm, hurt, low-health
+    this.grade = new Float32Array([1.06, 1.10, 0.0]);     // contrast, saturation, lift
+    this.bloomK = 0.35; this.bloomThresh = 0.82;
 
     gl.enable(gl.DEPTH_TEST);
     gl.disable(gl.CULL_FACE);
@@ -532,6 +711,7 @@ class Renderer {
 
     this._initShadow();
     this.skyVao = gl.createVertexArray();
+    this._initPost();
   }
 
   _normalize(v) { const l = len3(v[0], v[1], v[2]) || 1; v[0] /= l; v[1] /= l; v[2] /= l; return v; }
@@ -645,6 +825,176 @@ class Renderer {
     m4LookAt(this._lv, cx + s[0] * 230, cy + s[1] * 230, cz + s[2] * 230, cx, cy, cz, 0, 1, 0);
     m4Ortho(this._lp, -SHADOW_HALF, SHADOW_HALF, -SHADOW_HALF, SHADOW_HALF, 1, 520);
     m4Mul(this.lightVP, this._lp, this._lv);
+  }
+
+  /* --------------------------- post-processing ---------------------------- */
+
+  // Programs and state for the offscreen scene target + full-screen finish.
+  // `post.on` is the master switch (quality presets, FN.post(false)); `ok`
+  // goes false if the GPU refuses the targets, in which case the scene draws
+  // straight to the canvas as before.
+  _initPost() {
+    const gl = this.gl;
+    let maxS = 0;
+    try { maxS = gl.getParameter(gl.MAX_SAMPLES) | 0; } catch (e) { maxS = 0; }
+    this.post = {
+      on: true, ok: true, bloom: true, fxaa: true, scale: 1,
+      samples: Math.min(4, maxS), w: 0, h: 0, bw: 0, bh: 0,
+      sceneFbo: null, colorRb: null, depthRb: null, resolveFbo: null, resolveTex: null,
+      bloomFbo: [null, null], bloomTex: [null, null], msaa: false,
+    };
+    this.progPost = this._program(VS_FULL, FS_POST, '');
+    this.progBright = this._program(VS_FULL, FS_BRIGHT, '');
+    this.progBlur = this._program(VS_FULL, FS_BLUR, '');
+    gl.useProgram(this.progPost.p);
+    gl.uniform1i(this.progPost.u.uScene, 0); gl.uniform1i(this.progPost.u.uBloom, 1);
+    gl.useProgram(this.progBright.p); gl.uniform1i(this.progBright.u.uScene, 0);
+    gl.useProgram(this.progBlur.p); gl.uniform1i(this.progBlur.u.uTex, 0);
+    gl.useProgram(null);
+  }
+
+  _colorTex(w, h) {
+    const gl = this.gl, t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    return t;
+  }
+
+  _deleteTargets() {
+    const gl = this.gl, P = this.post;
+    for (const f of [P.sceneFbo, P.resolveFbo, P.bloomFbo[0], P.bloomFbo[1]]) if (f) gl.deleteFramebuffer(f);
+    for (const r of [P.colorRb, P.depthRb]) if (r) gl.deleteRenderbuffer(r);
+    for (const t of [P.resolveTex, P.bloomTex[0], P.bloomTex[1]]) if (t) gl.deleteTexture(t);
+    P.sceneFbo = P.resolveFbo = P.colorRb = P.depthRb = P.resolveTex = null;
+    P.bloomFbo = [null, null]; P.bloomTex = [null, null];
+    P.w = P.h = 0;
+  }
+
+  // (Re)build the offscreen targets for a scene size. Multisampled colour +
+  // depth renderbuffers are resolved into a plain texture; if the multisampled
+  // pair fails to complete, the same texture is rendered to directly and FXAA
+  // covers the edges.
+  _ensureTargets(w, h) {
+    const gl = this.gl, P = this.post;
+    if (P.w === w && P.h === h) return;
+    this._deleteTargets();
+    P.w = w; P.h = h;
+    P.resolveTex = this._colorTex(w, h);
+    P.resolveFbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, P.resolveFbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, P.resolveTex, 0);
+    const complete = () => gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+    let ok = complete();
+    P.msaa = false;
+    if (ok && P.samples > 1) {
+      P.colorRb = gl.createRenderbuffer();
+      gl.bindRenderbuffer(gl.RENDERBUFFER, P.colorRb);
+      gl.renderbufferStorageMultisample(gl.RENDERBUFFER, P.samples, gl.RGBA8, w, h);
+      P.depthRb = gl.createRenderbuffer();
+      gl.bindRenderbuffer(gl.RENDERBUFFER, P.depthRb);
+      gl.renderbufferStorageMultisample(gl.RENDERBUFFER, P.samples, gl.DEPTH_COMPONENT24, w, h);
+      P.sceneFbo = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, P.sceneFbo);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, P.colorRb);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, P.depthRb);
+      P.msaa = complete() && gl.getError() === gl.NO_ERROR;
+      if (!P.msaa) {
+        gl.deleteFramebuffer(P.sceneFbo); gl.deleteRenderbuffer(P.colorRb); gl.deleteRenderbuffer(P.depthRb);
+        P.sceneFbo = P.colorRb = P.depthRb = null;
+      }
+    }
+    if (ok && !P.msaa) {   // draw straight into the resolve texture, with a plain depth buffer
+      P.depthRb = gl.createRenderbuffer();
+      gl.bindRenderbuffer(gl.RENDERBUFFER, P.depthRb);
+      gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, w, h);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, P.resolveFbo);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, P.depthRb);
+      ok = complete();
+      P.sceneFbo = P.resolveFbo;
+    }
+    // bloom at a quarter of the scene size, ping-pong pair
+    P.bw = Math.max(8, w >> 2); P.bh = Math.max(8, h >> 2);
+    for (let i = 0; i < 2 && ok; i++) {
+      P.bloomTex[i] = this._colorTex(P.bw, P.bh);
+      P.bloomFbo[i] = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, P.bloomFbo[i]);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, P.bloomTex[i], 0);
+      ok = complete();
+    }
+    gl.bindRenderbuffer(gl.RENDERBUFFER, null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    P.ok = ok;
+    if (!ok) { console.warn('[render] post-process targets incomplete — drawing direct'); this._deleteTargets(); P.w = w; P.h = h; }
+  }
+
+  // Is the scene going through the offscreen target this frame?
+  get postActive() { return this.post.on && this.post.ok; }
+
+  // Resolve, bloom and finish to the canvas. Runs after the transparent pass.
+  _postPass() {
+    const gl = this.gl, P = this.post;
+    if (P.msaa) {
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, P.sceneFbo);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, P.resolveFbo);
+      gl.blitFramebuffer(0, 0, P.w, P.h, 0, 0, P.w, P.h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    }
+    gl.disable(gl.DEPTH_TEST); gl.depthMask(false); gl.disable(gl.BLEND);
+    gl.bindVertexArray(this.skyVao);
+    gl.activeTexture(gl.TEXTURE0);
+    const bloom = P.bloom && this.bloomK > 0;
+    if (bloom) {
+      let Pp = this.progBright;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, P.bloomFbo[0]);
+      gl.viewport(0, 0, P.bw, P.bh);
+      gl.useProgram(Pp.p);
+      gl.bindTexture(gl.TEXTURE_2D, P.resolveTex);
+      gl.uniform2f(Pp.u.uInvRes, 1 / P.w, 1 / P.h);
+      gl.uniform1f(Pp.u.uThresh, this.bloomThresh);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      Pp = this.progBlur;
+      gl.useProgram(Pp.p);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, P.bloomFbo[1]);
+      gl.bindTexture(gl.TEXTURE_2D, P.bloomTex[0]);
+      gl.uniform2f(Pp.u.uDir, 1 / P.bw, 0);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, P.bloomFbo[0]);
+      gl.bindTexture(gl.TEXTURE_2D, P.bloomTex[1]);
+      gl.uniform2f(Pp.u.uDir, 0, 1 / P.bh);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      this.drawCalls += 3;
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+    const Pp = this.progPost, u = Pp.u;
+    gl.useProgram(Pp.p);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, bloom ? P.bloomTex[0] : this.whiteTex);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, P.resolveTex);
+    gl.uniform2f(u.uInvRes, 1 / P.w, 1 / P.h);
+    gl.uniform1f(u.uAspect, this._aspect);
+    gl.uniform1f(u.uFxaa, (P.fxaa && !P.msaa) ? 1 : 0);
+    gl.uniform1f(u.uBloomK, bloom ? this.bloomK : 0);
+    gl.uniform4fv(u.uFx, this.fx);
+    gl.uniform3fv(u.uGrade, this.grade);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    this.drawCalls++;
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    gl.enable(gl.DEPTH_TEST); gl.depthMask(true);
+  }
+
+  // Quality presets. Shadows and bloom are the two costs that matter on an
+  // integrated GPU; `scale` renders the scene smaller and lets the post pass
+  // upsample it.
+  setQuality(preset) {
+    const P = this.post;
+    if (preset === 'low') { this.shadowsOn = false; P.on = false; P.bloom = false; P.scale = 0.75; }
+    else if (preset === 'medium') { this.shadowsOn = true; P.on = true; P.bloom = false; P.scale = 1; }
+    else { this.shadowsOn = true; P.on = true; P.bloom = true; P.scale = 1; }
+    this.quality = preset;
   }
 
   /* ------------------------------- meshes --------------------------------- */
@@ -878,6 +1228,12 @@ class Renderer {
     const gl = this.gl;
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     this._aspect = this.canvas.width / this.canvas.height;
+    // the scene target follows the canvas (times the render scale); the post
+    // pass upsamples it to the canvas
+    if (this.post.on) {
+      const s = clamp(this.post.scale || 1, 0.4, 1);
+      this._ensureTargets(Math.max(8, Math.round(this.canvas.width * s)), Math.max(8, Math.round(this.canvas.height * s)));
+    }
     m4Perspective(this.proj, fov, this._aspect, 0.08, 1400);
     m4View(this.view, camX, camY, camZ, yaw, pitch);
     m4Mul(this.vp, this.proj, this.view);
@@ -981,7 +1337,9 @@ class Renderer {
     if (u.uSkyCol) gl.uniform3fv(u.uSkyCol, this.skyCol);
     if (u.uGndCol) gl.uniform3fv(u.uGndCol, this.gndCol);
     if (u.uFogCol) gl.uniform3fv(u.uFogCol, this.fog);
+    if (u.uFogSun) gl.uniform3fv(u.uFogSun, this.fogSun);
     if (u.uFogP) gl.uniform2f(u.uFogP, this.fogStart, 1 / this.fogRange);
+    if (u.uExposure) gl.uniform1f(u.uExposure, this.exposure);
     if (u.uShadowVP) gl.uniformMatrix4fv(u.uShadowVP, false, this.lightVP);
     if (u.uShadowTexel) gl.uniform1f(u.uShadowTexel, 1 / SHADOW_SIZE);
     if (u.uShadowOn) gl.uniform1f(u.uShadowOn, this.shadowsOn ? 1 : 0);
@@ -1064,9 +1422,11 @@ class Renderer {
         this._drawSkinned(this.progDepthSkin);
       }
       gl.disable(gl.POLYGON_OFFSET_FILL);
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-      gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     }
+    // the scene goes to the offscreen target when the post pass is on, else the canvas
+    const post = this.postActive;
+    if (post) { gl.bindFramebuffer(gl.FRAMEBUFFER, this.post.sceneFbo); gl.viewport(0, 0, this.post.w, this.post.h); }
+    else { gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, this.canvas.width, this.canvas.height); }
 
     // 3. sky
     gl.clearColor(this.fog[0], this.fog[1], this.fog[2], 1);
@@ -1080,6 +1440,7 @@ class Renderer {
       gl.uniform3fv(u.uSunDir, this.sun); gl.uniform1f(u.uTime, this.time);
       gl.uniform3fv(u.uZenith, this.zenith); gl.uniform3fv(u.uHorizon, this.horizon);
       gl.uniform3fv(u.uGround, this.ground); gl.uniform3fv(u.uFogCol, this.fog);
+      gl.uniform3fv(u.uFogSun, this.fogSun); gl.uniform1f(u.uExposure, this.exposure);
       gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_2D, this.tex.noise);
       gl.bindVertexArray(this.skyVao);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -1124,6 +1485,9 @@ class Renderer {
       this._drawModels(true);
     }
     gl.depthMask(true); gl.disable(gl.BLEND);
+
+    // 6. finish: resolve, bloom, FXAA / grade / vignette to the canvas
+    if (post) this._postPass();
     gl.bindVertexArray(null);
   }
 
