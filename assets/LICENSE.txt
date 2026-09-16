@@ -43,3 +43,15 @@
 	Follow here for updates:
 	http://twitter.com/KayLousberg
 	https://mastodon.gamedev.place/@Kay
+
+	------------------------------
+
+	Quaternius : Ultimate Stylized Nature (May 2022),
+	             Zombie Apocalypse Kit, Ultimate Space Kit
+
+	Created/distributed by Quaternius (https://quaternius.com)
+
+	License: (Creative Commons Zero, CC0)
+	http://creativecommons.org/publicdomain/zero/1.0/
+
+	Textures in assets/tex/ are downscaled copies of the pack originals.

@@ -381,6 +381,42 @@ pages through the live server via the DevTools protocol).
   controller support, real map with heightfield, aim-assist fix and frame-cost
   pass. (History in git-less detail: the earlier CONTEXT.md.)
 
+- **v2.2 (2026-09-15)** — four parallel passes merged: gunplay, image quality
+  and feel, bug fixes, and higher-quality models.
+  *Gunplay.* Recoil rebuilt (see "Combat / loot"): per-weapon profiles in
+  `RECOIL`, time-based kick that chases a target offset, climbs to a cap during
+  a burst and recovers toward the pre-shot aim while respecting the player's own
+  compensation; honest crosshair bloom from the real spread cone; gun and body
+  punch visuals; `FN.recoil(scale)`; `dev/recoiltest.js` (93 checks at 30 /
+  60 / 144 fps). Before this a shot raised the pitch permanently, per frame.
+  *Renderer.* Offscreen MSAA scene target with a post pass (FXAA fallback,
+  bloom, grading, GL vignette, storm tint, hurt flash, low-health pulse),
+  filmic tone map, sun-inscatter fog, richer sky, alpha-cutout shadows, shared
+  textures, foliage lighting, emissive materials; frame-time readout and
+  `FN.post` / `FN.quality` / `FN.perf`; `dev/shot.js` DevTools screenshots.
+  *Feel and audio.* View bob and sway, landing camera dip, sprint FOV, damage
+  direction arcs (attacker id travels in host snapshots), elimination banner,
+  popping shield-blue damage numbers; footsteps by surface (yours and others'
+  within 30 m), reload / harvest / chest / kill / storm-warning sounds,
+  distance-scaled gunfire, looping ambience with music, audio started on the
+  first gesture.
+  *Models.* 175 assets (20 MB): Quaternius Ultimate Stylized Nature trees,
+  dead trees, bushes, rocks and ground cover with real textures (`assets/tex/`,
+  weighted variants, trunk-only colliders via `maxR`); Zombie Apocalypse Kit
+  vehicles, streetlights, traffic lights, cones, barriers, containers, water
+  tower, town sign, chests; Ultimate Space Kit dome, modules, ships, rovers,
+  solar, radar, alien plants and rocks, ammo / medkit pickups; real gun models
+  (`GUN_GLTF`, procedural assemblies kept as fallback; the sniper is the rifle
+  with a procedural scope, the fire axe stands in for the pickaxe).
+  `dev/fetchpack.js` rebuilds `assets/` from GitHub raw and the packs'
+  public Google Drive folders. The replaced KayKit files are still in the
+  folder; nothing references them.
+  *Bugs.* Inventory state on slot switch, bots' loot drop, storm end, lobby host
+  quirks, the host now answers an optimistic build that lost its support with
+  `nopiece` (the client takes it back and is refunded), no glider on an airborne
+  elimination, `dev/browsertest.js` DevTools ports overridable by env;
+  `dev/test.js` 35 → 75 checks, `dev/mptest.js` 38 → 50.
+
 - **v2.1 (2026-09-14)** — Fortnite player push: walls place on the line you
   straddle and shove you clear, ramps/cones built on you lift you onto them,
   nothing pushes you into the ground, and ramp decks are solid from the side

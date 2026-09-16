@@ -1,6 +1,6 @@
 {
   "name": "fortnite-lite",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "private": true,
   "description": "Zero-dependency WebGL2 browser battle royale with lobbies for friends",
   "main": "server.js",

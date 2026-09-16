@@ -1,9 +1,20 @@
 # assets/
 
-Every model the game draws. All of it is **CC0** from
-[KayKit](https://kaylousberg.itch.io) (also on
-[GitHub](https://github.com/KayKit-Game-Assets)) — no attribution required,
-commercial use fine. `LICENSE.txt` is KayKit's licence.
+Every model the game draws. All of it is **CC0** — no attribution required,
+commercial use fine — from two authors:
+
+- [KayKit](https://kaylousberg.itch.io) (also on
+  [GitHub](https://github.com/KayKit-Game-Assets)): the five skinned characters
+  and the farm / camp / graveyard / furniture props.
+- [Quaternius](https://quaternius.com): **Ultimate Stylized Nature** (textured
+  trees, dead trees, bushes, rocks, grass and plants; textures downscaled into
+  `tex/`), **Zombie Apocalypse Kit** (vehicles, streetlights, traffic lights,
+  cones, barriers, containers, water tower, town sign, the real gun models, the
+  fire axe, chests) and **Ultimate Space Kit** (dome, modules, ships, rovers,
+  solar panels, radar, alien plants and rocks, the ammo / medkit pickups).
+
+`LICENSE.txt` carries both CC0 notices. `dev/fetchpack.js` rebuilds this
+folder from the packs' public downloads.
 
 Nothing in here is required: every draw site keeps a procedural fallback, so a
 missing or broken file costs you the nicer model and nothing else. `FN.assets()`
