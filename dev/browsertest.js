@@ -9,12 +9,17 @@ const { spawn } = require('child_process');
 const http = require('http');
 const CHROME = process.env.CHROME || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const URL_ = (process.env.URL || 'http://localhost:3500/') + '?browsertest=1';
+// Two copies running at once (two worktrees, two agents) must not share DevTools
+// ports or Chrome profiles: BT_PORT is the first of two consecutive ports and
+// BT_PROFILE the profile-dir prefix under %TEMP%.
+const BT_PORT = +(process.env.BT_PORT || 9301);
+const BT_PROFILE = process.env.BT_PROFILE || 'fl-bt-';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const getJson = url => new Promise((res, rej) => http.get(url, r => { let d = ''; r.on('data', c => d += c); r.on('end', () => res(JSON.parse(d))); }).on('error', rej));
 
 async function launch(port, tag) {
   const p = spawn(CHROME, ['--headless=new', '--disable-gpu', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--window-size=1000,700',
-    '--remote-debugging-port=' + port, '--user-data-dir=' + process.env.TEMP + '\\fl-bt-' + tag, '--no-first-run', '--autoplay-policy=no-user-gesture-required', URL_], { stdio: 'ignore' });
+    '--remote-debugging-port=' + port, '--user-data-dir=' + process.env.TEMP + '\\' + BT_PROFILE + tag, '--no-first-run', '--autoplay-policy=no-user-gesture-required', URL_], { stdio: 'ignore' });
   let targets = null;
   for (let i = 0; i < 60 && !targets; i++) { await sleep(500); try { targets = (await getJson('http://localhost:' + port + '/json')).filter(t => t.type === 'page'); if (!targets.length) targets = null; } catch (e) { /* not up */ } }
   if (!targets) throw new Error('chrome ' + tag + ' did not come up');
@@ -28,14 +33,17 @@ async function launch(port, tag) {
     if (r.result.exceptionDetails) throw new Error(tag + ': ' + JSON.stringify(r.result.exceptionDetails.exception && r.result.exceptionDetails.exception.description || r.result.exceptionDetails.text));
     return r.result.result.value;
   };
-  return { p, ev, ws, tag };
+  // p.kill() only takes the browser process; on Windows the renderer / GPU children
+  // (and the debug port) outlive it, so take the whole tree down
+  const kill = () => { try { ws.close(); } catch (e) { /* */ } try { require('child_process').execSync('taskkill /F /T /PID ' + p.pid, { stdio: 'ignore' }); } catch (e) { p.kill(); } };
+  return { p, ev, ws, tag, kill };
 }
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) { pass++; console.log('  ok   ' + m); } else { fail++; console.log('  FAIL ' + m); } };
 
 (async () => {
-  const A = await launch(9301, 'a'), B = await launch(9302, 'b');
+  const A = await launch(BT_PORT, 'a'), B = await launch(BT_PORT + 1, 'b');
   try {
     for (const X of [A, B]) {
       for (let i = 0; i < 40; i++) { if (await X.ev('typeof Net !== "undefined" && !!Net.ui && G.state === "menu"')) break; await sleep(250); }
@@ -86,7 +94,7 @@ const ok = (c, m) => { if (c) { pass++; console.log('  ok   ' + m); } else { fai
     await sleep(400);
     ok(await A.ev('G.state === "menu" && Net.active && Net.players.length === 2'), 'a: host back in the lobby with both players');
   } catch (e) { fail++; console.log('  FAIL ' + e.message); }
-  finally { A.p.kill(); B.p.kill(); }
+  finally { A.kill(); B.kill(); }
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();

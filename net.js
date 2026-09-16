@@ -198,7 +198,15 @@ const Net = {
       case 'dr': if (this.hosting) { const p = World.propById.get(d.i); if (p) damageProp(p, +d.d || 0); } break;
       case 'build':
         if (this.hosting && e) {
-          if (!canPlace(d.ty, d.gx, d.gy, d.gz, d.rot)) break;
+          if (!canPlace(d.ty, d.gx, d.gy, d.gz, d.rot)) {
+            // Nothing holds it here — its support went a moment ago and the
+            // collapse is still on its way to them. They placed it optimistically,
+            // so tell them to take it back; if a piece already stands there, the
+            // 'piece' broadcast for it has them covered.
+            const key = pieceKey(d.ty, d.gx, d.gy, d.gz, d.rot);
+            if (!World.pieces.has(key)) this.to(from, { t: 'nopiece', k: key });
+            break;
+          }
           const p = addPiece(d.ty, d.gx, d.gy, d.gz, d.rot, d.mat, e);
           if (!p) break;
           p.born = G.t;
@@ -231,6 +239,12 @@ const Net = {
         }
         break;
       case 'pgone': if (fromHost) { const p = World.pieces.get(d.k); if (p) { removePiece(p, true); const [cx, cz] = tileCenter(p.gx, p.gz); materialChips(MAT_COLOR[p.mat], cx, p.gy * LEV + 1.5, cz, 6); } } break;
+      case 'nopiece':   // my optimistic build had nothing to stand on by the time the host saw it
+        if (fromHost) {
+          const p = World.pieces.get(d.k);
+          if (p && p.owner === G.player) { removePiece(p, true); G.player.mats[p.mat] = Math.min(999, G.player.mats[p.mat] + BUILD_COST); }
+        }
+        break;
       case 'collapse': if (fromHost) for (const k of d.ks) { const p = World.pieces.get(k); if (p) collapsePiece(p); } break;
       case 'prgone': if (fromHost) { const p = World.propById.get(d.i); if (p) destroyProp(p); } break;
       case 'lspawn':

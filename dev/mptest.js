@@ -46,7 +46,7 @@ function makeInstance(label) {
   const ctx = vm.createContext(sandbox);
   for (const f of SCRIPTS) vm.runInContext(fs.readFileSync(path.join(root, f), 'utf8'), ctx, { filename: label + ':' + f });
   // top-level const/function bindings are not properties of the sandbox — pull out the ones the test drives
-  const api = vm.runInContext('({ Net, G, World, Input, makeEntity, entById, update, terrainHeight, surfaceUnder, dealDamage, buildPlan, pieceKey, tryBuild, damagePiece, updateSupport, spawnLoot, tossLoot, lootById, requestTake, dropHeld, applyDamage, nextSpectate, canRunNow })', ctx);
+  const api = vm.runInContext('({ Net, G, World, Input, makeEntity, entById, update, terrainHeight, surfaceUnder, dealDamage, buildPlan, pieceKey, tryBuild, damagePiece, updateSupport, spawnLoot, tossLoot, lootById, requestTake, dropHeld, applyDamage, nextSpectate, canRunNow, removePiece, BUILD_COST })', ctx);
   api.document = sandbox.document; api.window = sandbox;
   return api;
 }
@@ -183,7 +183,30 @@ H.Net.startMatch();
 ok(H.G.state === 'drop' && C.G.state === 'drop' && C.Net.client && !C.Net.endTitle, 'rematch: both drop again from the same lobby');
 ok(H.G.ents.filter(e => e.isBot).every(e => e.id >= 1000) && C.G.ents.filter(e => e.isBot).every(e => e.id >= 1000), 'rematch: bot ids live far above any lobby id');
 land(H); land(C);
+for (const ctx of [H, C]) {   // both humans back on the flat plateau, where a storey-up floor is never "grounded"
+  for (const id of [1, 2]) { const e = ctx.entById(id); e.pos[0] = poi.x + (id === 1 ? -3 : 3); e.pos[2] = poi.z; e.pos[1] = ctx.surfaceUnder(e.pos[0], 200, e.pos[2], 200) + 0.01; }
+  for (const b of ctx.G.ents) if (b.isBot) { b.pos[0] = -300; b.pos[2] = -300; b.pos[1] = ctx.terrainHeight(-300, -300); b.wander[0] = -300; b.wander[1] = -300; b.think = 999; }
+}
 step(5, 1 / 20);
+// a build whose support is already gone on the host is taken back from the builder
+{
+  const cp2 = C.G.player;
+  cp2.mats = [500, 500, 500]; cp2.buildMode = true; cp2.buildMat = 0; cp2.buildType = 0; cp2.yaw = 0; cp2.pitch = 0;
+  const wplan = C.buildPlan(cp2), wkey = C.pieceKey('wall', wplan.gx, wplan.gy, wplan.gz, wplan.rot);
+  ok(C.tryBuild(cp2), 'rematch: client builds a wall');
+  step(3, 1 / 20);
+  ok(H.World.pieces.has(wkey), 'rematch: the host has it');
+  H.removePiece(H.World.pieces.get(wkey), true);        // gone on the host only, as if its collapse were still in flight
+  cp2.buildType = 1; cp2.pitch = 0.7; cp2.buildT = 0;   // looking up: a floor on top of that wall
+  const fplan = C.buildPlan(cp2), fkey = C.pieceKey('floor', fplan.gx, fplan.gy, fplan.gz, 0);
+  const matsBefore = cp2.mats[0];
+  // (the in-memory relay answers synchronously, so the host's refusal already lands inside tryBuild)
+  ok(fplan.gy === wplan.gy + 1 && C.tryBuild(cp2), 'rematch: client puts a floor on the wall it can still see');
+  step(3, 1 / 20);
+  ok(!H.World.pieces.has(fkey), 'refused build: the host never placed it');
+  ok(!C.World.pieces.has(fkey) && cp2.mats[0] === matsBefore, 'refused build: taken back from the client, materials refunded');
+  cp2.buildMode = false; cp2.pitch = 0;
+}
 // the host losing pointer lock must not freeze the match for everyone
 C.window.__NOLOCK = false; C.Input.locked = false; C.Input.padActive = false;
 ok(C.canRunNow(), 'a lobby match keeps simulating while the pointer is not locked');

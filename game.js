@@ -333,6 +333,7 @@ function hurtFrom(x, z) {
 function eliminate(e, attacker, byStorm, placement) {
   if (!e.alive) return;
   e.alive = false; e.hp = 0; e.deadT = 0;
+  e.glide = false;            // shot out of the air: the body falls without its canopy
   if (e.anim) e.anim.play('Death_A', 0.08, false, true);
   e.upper = null;
   G.alive--;

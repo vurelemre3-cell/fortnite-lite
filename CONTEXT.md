@@ -252,6 +252,10 @@ rocks, 700 bushes and 80 logs are scattered off the roads and POIs.
   name tag with an `[E]` / `[X]` prompt on the one you are pointing at
   (`lookedAtLoot`: scored by angle from the eye, not the camera).
 - Materials and ammo are auto-collected; guns and heals are taken with E / X.
+- A reload belongs to the gun it started on (`reloadItem`) and a heal to its slot
+  (`startUse` / `finishUse`, bots included); any slot change — wheel, digit, pad,
+  pickup, drop — cancels what was in progress (`cancelActions`) rather than
+  finishing it on whatever is held by then.
 
 ## Particles, bus, glider
 
@@ -276,8 +280,11 @@ the name + health of the piece or prop under the crosshair (`drawTargetInfo`).
 POI (a world is generated at boot for it). `newMatch()` regenerates the world,
 terrain mesh, splat map and minimap, spawns 24 entities spread along the bus
 line at y≈150–172, and starts the storm. Freefall at 42 m/s, glider below 45 m
-above ground. Bots keep their AI from before (acquire within 65 m with LOS,
-rotate to the circle, strafe, burst, panic wall, loot real items, heal).
+above ground; a bot keeps diving until it touches down even after the player has
+landed and the state is `play`. Bots keep their AI from before (acquire within
+65 m with LOS, rotate to the circle, strafe, burst, panic wall, loot real items,
+heal). After the last circle the storm is closed for good (`STORM_DONE_T`, HUD
+"STORM CLOSED"); only its damage tick keeps running.
 
 ## Screenshot / debug mode
 
@@ -332,7 +339,9 @@ locally and send `'hit'` / `'dp'` / `'dr'` to the host. `requestTake` →
 runs `takeLoot`), `netDropLoot` → `'drop'`, `interact` on a chest → `'chest'`
 (host rolls and flings, everyone gets `'lspawn'`s and `'chestOpen'`), heals →
 `'heal'`. `tryBuild` places locally at once and sends `'build'`; the host
-answers `'piece'` (same key → no-op). World hooks (`World.onPieceGone`,
+answers `'piece'` (same key → no-op), or `'nopiece'` when nothing holds it up
+any more (its support collapsed in flight) and the builder takes it back with a
+refund. World hooks (`World.onPieceGone`,
 `onCollapse`, `onPropGone`, `onLootToss`) let the host broadcast `'pgone'`,
 `'collapse'`, `'prgone'`, `'lspawn'`. `updateSupport` and `updateStorm`'s phase
 / damage logic run only with authority; a client's storm just lerps the
