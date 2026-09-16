@@ -1437,7 +1437,28 @@ function renderScene() {
     R.push(MESH_CYL, s.cx, sy, s.cz, 0, 0, s.r + 1.5, sh, s.r + 1.5, 0.35, 0.16, 0.75, 0.24);
   }
 
+  updateScreenFx();
   R.end();
+}
+
+// What the post pass paints over the frame: the vignette, its purple storm
+// version, the hurt flash and the low-health pulse — all eased so nothing snaps.
+function updateScreenFx() {
+  const fx = R.fx, p = G.player, dt = G.frameDt || 0.016;
+  const playing = G.state === 'play' || G.state === 'drop';
+  const inS = playing && G.storm && p && inStorm(p.pos[0], p.pos[2]) ? 1 : 0;
+  G.stormK = lerp(G.stormK || 0, inS, Math.min(1, 3 * dt));
+  fx[0] = G.state === 'menu' ? 0 : 0.32;
+  fx[1] = G.stormK;
+  fx[2] = clamp(G.hurtFlash, 0, 1);
+  let low = 0;
+  if (playing && p && p.alive && p.shield <= 0 && p.hp < 35) {
+    const k = 1 - p.hp / 35;                       // 0 at 35 hp, 1 at death's door
+    const beat = Math.sin(G.t * (5 + 5 * k));       // the heartbeat quickens as hp drops
+    low = k * (0.55 + 0.45 * Math.max(0, beat));
+  }
+  G.lowK = lerp(G.lowK || 0, low, Math.min(1, 8 * dt));
+  fx[3] = G.lowK;
 }
 
 // One build piece with its material texture. `s` is the build-up scale (walls
@@ -1773,11 +1794,15 @@ function drawHUD() {
   const p = G.player;
   if (G.state === 'menu') return;
 
-  drawVignette(W, H);
-  if (G.hurtFlash > 0) {
-    hud.fillStyle = `rgba(200,20,20,${G.hurtFlash * 0.35})`;
-    hud.fillRect(0, 0, W, H);
+  // with the GL post pass off (low quality / no targets) these are painted here instead
+  if (!R.postActive) {
+    drawVignette(W, H);
+    if (G.hurtFlash > 0) {
+      hud.fillStyle = `rgba(200,20,20,${G.hurtFlash * 0.35})`;
+      hud.fillRect(0, 0, W, H);
+    }
   }
+  if (G.showPerf) drawPerf(W, H);
 
   if (G.state === 'drop' || G.state === 'play' || G.state === 'dead' || G.state === 'win') {
     drawTopRight(W, H);
@@ -1825,6 +1850,19 @@ function drawHUD() {
     hud.font = '700 26px system-ui, sans-serif'; hud.textAlign = 'center'; hud.fillStyle = '#fff';
     hud.fillText('CLICK TO RESUME', W / 2, H / 2);
   }
+}
+
+// Frame-time readout (Settings → show performance, or FN.perf(true)): frame
+// and render milliseconds as running averages, draw calls and instances.
+function drawPerf(W, H) {
+  const q = G.perf;
+  if (!q) return;
+  hud.font = '600 11px ui-monospace, Consolas, monospace'; hud.textAlign = 'left';
+  hud.fillStyle = 'rgba(0,0,0,.5)'; hud.fillRect(18, H * 0.5 - 12, 214, 60);
+  hud.fillStyle = '#9f9';
+  hud.fillText('frame ' + q.frame.toFixed(1) + ' ms  (' + (1000 / Math.max(0.1, q.frame)).toFixed(0) + ' fps)', 24, H * 0.5);
+  hud.fillText('render ' + q.render.toFixed(1) + ' ms   sim ' + q.sim.toFixed(1) + ' ms', 24, H * 0.5 + 16);
+  hud.fillText('draws ' + R.drawCalls + '   inst ' + R.instances + '   ' + (R.postActive ? (R.post.msaa ? 'msaa' + R.post.samples : 'fxaa') : 'direct'), 24, H * 0.5 + 32);
 }
 
 let _vig = null, _vigKey = '';
@@ -2350,12 +2388,20 @@ function frame(now) {
     return;
   }
   const canRun = Input.locked || Input.padActive || G.state === 'dead' || G.state === 'win' || window.__NOLOCK;
+  G.frameDt = dt;
+  const perf = G.perf || (G.perf = { frame: 16, render: 0, sim: 0 });
+  const t0 = performance.now();
   if (canRun) update(dt);
+  const t1 = performance.now();
   // Only resize when it actually changed — assigning width/height reallocates the
   // whole backing store, and doing that 60 times a second is a real frame cost.
   // (drawHUD clears the whole canvas itself, so skipping the resize is safe)
   renderScene();
   drawHUD();
+  const t2 = performance.now();
+  perf.frame += (dt * 1000 - perf.frame) * 0.05;
+  perf.sim += (t1 - t0 - perf.sim) * 0.05;
+  perf.render += (t2 - t1 - perf.render) * 0.05;
   updateOverlays();
   Input.endFrame();
 }
@@ -2518,6 +2564,9 @@ function boot() {
     reload: (name, url) => Assets.load(name, url || 'assets/' + name + '.glb', MANIFEST[name]),
     aimAssist: on => { G.aimAssist = on !== false; },
     shadows: on => { R.shadowsOn = on !== false; },
+    post: on => { R.post.on = on !== false; },
+    quality: q => { R.setQuality(q || 'high'); },
+    perf: on => { G.showPerf = on !== false; },
     // what pad was detected and which slots are live — for diagnosing an odd controller
     pad: () => Input.pad && ({
       id: Input.pad.id, mapping: Input.pad.mapping, profile: Input._prof,
@@ -2598,8 +2647,13 @@ async function autoRun(q) {
   let _dark = 0; for (let i = 0; i < _px.length; i += 4) if (_px[i] + _px[i + 1] + _px[i + 2] < 30) _dark++;
   window.__READY = { calls: R.drawCalls, instances: R.instances, errors: Assets.errors.slice(), loaded: Object.keys(Assets.models).length, glError: _gl.getError(), dark: +(100 * _dark / (_w * _h)).toFixed(1), size: _w + "x" + _h, state: G.state, pos: G.player.pos.map(v => +v.toFixed(1)), anim: G.player.anim && G.player.anim.curName, upper: G.player.upper, slot: G.player.slot, item: curItem(G.player) && curItem(G.player).id };
   document.title = 'READY';
-  hud.setTransform(1, 0, 0, 1, 0, 0); hud.font = '12px monospace'; hud.fillStyle = '#5f5'; hud.textAlign = 'left'; hud.textBaseline = 'top';
-  hud.fillText('READY ' + JSON.stringify(window.__READY), 8, 4);
+  const status = () => {
+    hud.setTransform(1, 0, 0, 1, 0, 0); hud.font = '12px monospace'; hud.fillStyle = '#5f5'; hud.textAlign = 'left'; hud.textBaseline = 'top';
+    hud.fillText('READY ' + JSON.stringify(window.__READY), 8, 4);
+  };
+  status();
+  // dev/shot.js calls this after poking at the page so the frame it captures is current
+  window.__shot = () => { if (G.player && G.state !== 'menu') updateCamera(G.player, 1); renderScene(); drawHUD(); updateOverlays(); status(); };
 }
 
 addEventListener('DOMContentLoaded', boot);
