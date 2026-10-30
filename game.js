@@ -1401,11 +1401,13 @@ function botThink(b) {
     const d = dist2(b.pos[0], b.pos[2], e.pos[0], e.pos[2]);
     if (d < bd && losClear(b.pos[0], entEye(b), b.pos[2], e.pos[0], entEye(e), e.pos[2])) { bd = d; best = e; }
   }
-  if (best) {
+  // An unarmed bot only fights at close range; otherwise it keeps searching for loot.
+  const canEngage = best && (botHasGun(b) || bd < 12 * 12);
+  if (canEngage) {
     b.target = best;
     b.lastSeenX = best.pos[0]; b.lastSeenZ = best.pos[2]; b.lastSeenY = entEye(best);
     b.targetMemory = 2.1 + b.skill * 1.1;
-  } else if (!b.target || !b.target.alive || b.targetMemory <= 0) {
+  } else if (!b.target || !b.target.alive || b.targetMemory <= 0 || !botHasGun(b)) {
     b.target = null; b.burst = 0;
   }
   const distance = b.target && b.target.alive
