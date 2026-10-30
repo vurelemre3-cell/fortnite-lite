@@ -1186,6 +1186,7 @@ function autoPickup(e) {
     const l = World.loot[i];
     if (restricted && !AUTO_KINDS[l.kind]) continue;
     if (l.cool > 0) continue;
+    if (e.isBot && l.kind === 'weapon') { botPickupWeapon(e, l); continue; }
     if (dist2(e.pos[0], e.pos[2], l.x, l.z) > 2.6 || Math.abs(l.y - e.pos[1]) > 3) continue;
     requestTake(e, l, false);
   }
@@ -1193,11 +1194,60 @@ function autoPickup(e) {
 
 /* ---------------------------------- bots ----------------------------------- */
 
+// Bots evaluate their own inventory and select a weapon for the current engagement.
+const BOT_WEAPON_RANGES = {
+  pistol: 30, smg: 24, tacsmg: 28, ar: 58, heavyAR: 72,
+  shotgun: 10, autoShotgun: 13, revolver: 36, dmr: 112, sniper: 155,
+};
+function botWeaponScore(b, item, distance) {
+  if (!item || !WEAPONS[item.id] || !WEAPONS[item.id].ammo) return -1e6;
+  const w = WEAPONS[item.id], reserve = b.ammo[w.ammo] || 0;
+  if ((item.mag || 0) <= 0 && reserve <= 0) return -1e6;
+  const ideal = BOT_WEAPON_RANGES[item.id] || 45;
+  const fit = Math.max(0, 1 - Math.abs(distance - ideal) / (ideal * 1.5 + 22));
+  const rangePenalty = distance > w.range ? 2.4 : distance > w.range * 0.9 ? 0.65 : 0;
+  return fit * 2.4 + (item.rar || 0) * 0.13 + ((item.mag || 0) > 0 ? 0.28 : -0.18)
+    + (reserve > 0 ? 0.08 : 0) - rangePenalty;
+}
+function botBestWeaponSlot(b, distance) {
+  let best = -1, score = -1e6;
+  for (let i = 1; i < b.inv.length; i++) {
+    const value = botWeaponScore(b, b.inv[i], distance);
+    if (value > score) { score = value; best = i; }
+  }
+  return score > -1e5 ? best : -1;
+}
+function botUpgradeSlot(b, item, distance) {
+  const empty = b.inv.findIndex((x, i) => i > 0 && !x);
+  if (empty > 0) return empty;
+  const incoming = botWeaponScore(b, item, distance);
+  if (incoming < -1e5) return -1;
+  let weakest = -1, weakScore = 1e6;
+  for (let i = 1; i < b.inv.length; i++) {
+    const value = botWeaponScore(b, b.inv[i], distance);
+    if (value < weakScore) { weakScore = value; weakest = i; }
+  }
+  return weakest > 0 && incoming > weakScore + 0.38 ? weakest : -1;
+}
+function botPickupWeapon(b, loot) {
+  const distance = b.target && b.target.alive
+    ? Math.sqrt(dist2(b.pos[0], b.pos[2], b.target.pos[0], b.target.pos[2])) : 42;
+  const slot = botUpgradeSlot(b, loot.data.item, distance);
+  if (slot < 1) return false;
+  const replacing = !!b.inv[slot];
+  if (replacing) b.slot = slot;   // takeLoot swaps the selected slot when inventory is full
+  if (!takeLoot(b, loot, replacing)) return false;
+  const best = botBestWeaponSlot(b, distance);
+  if (best > 0) b.slot = best;
+  return true;
+}
+function botHasGun(b) { return botBestWeaponSlot(b, 45) > 0; }
+
 function updateBot(b, dt) {
   if (!b.alive) return;
-  // Still coming down from the bus: keep diving until touchdown, whether or not
-  // the player has already landed (the state flips to 'play' the moment they
-  // do, which used to freeze every airborne bot's glider open for the match).
+  if (b.targetMemory > 0) b.targetMemory = Math.max(0, b.targetMemory - dt);
+  if (b.dodgeT > 0) b.dodgeT = Math.max(0, b.dodgeT - dt);
+  // Still coming down from the bus: keep diving until touchdown.
   if (!b.landed && b.pos[1] > terrainHeight(b.pos[0], b.pos[2]) + 0.1) {
     const dx = b.landing.x - b.pos[0], dz = b.landing.z - b.pos[2];
     const l = len2(dx, dz) || 1;
@@ -1212,54 +1262,93 @@ function updateBot(b, dt) {
   const s = G.storm;
   let goX = null, goZ = null, sprint = false;
   const dc = Math.sqrt(dist2(b.pos[0], b.pos[2], s.cx, s.cz));
-
-  // grabbing a weapon 20m away beats sprinting to the circle empty-handed
   const grabFirst = b.lootTarget && dist2(b.pos[0], b.pos[2], b.lootTarget[0], b.lootTarget[1]) < 25 * 25;
-  if (dc > s.r * 0.78 && !grabFirst) { goX = s.cx; goZ = s.cz; sprint = true; }   // rotate to safety
-  else if (b.target && b.target.alive) {                                 // fight
-    if (b.useT > 0) { b.useT = 0; b.useKind = null; }   // getting shot at interrupts a heal
+
+  if (dc > s.r * 0.78 && !grabFirst) {
+    goX = s.cx; goZ = s.cz; sprint = true;
+  } else if (b.target && b.target.alive) {
+    if (b.useT > 0) { b.useT = 0; b.useKind = null; } // combat interrupts a heal
     const t = b.target;
-    const d = Math.sqrt(dist2(b.pos[0], b.pos[2], t.pos[0], t.pos[2]));
-    const dx = t.pos[0] - b.pos[0], dz = t.pos[2] - b.pos[2];
+    const visible = losClear(b.pos[0], entEye(b), b.pos[2], t.pos[0], entEye(t), t.pos[2]);
+    let tx = visible ? t.pos[0] : (b.lastSeenX === null ? t.pos[0] : b.lastSeenX);
+    let tz = visible ? t.pos[2] : (b.lastSeenZ === null ? t.pos[2] : b.lastSeenZ);
+    if (visible) {
+      b.lastSeenX = tx; b.lastSeenZ = tz; b.lastSeenY = entEye(t);
+      b.targetMemory = Math.max(b.targetMemory, 2.1 + b.skill * 1.1);
+    }
+    const dx = tx - b.pos[0], dz = tz - b.pos[2];
+    const d = len2(dx, dz);
     b.yaw = Math.atan2(-dx, -dz);
-    b.pitch = clamp(Math.atan2(entEye(t) - entEye(b), d), -1, 1);
-    const want = curItem(b) && curItem(b).id === 'shotgun' ? 8 : 18;
+    const targetY = visible ? entEye(t) : (b.lastSeenY === null ? entEye(t) : b.lastSeenY);
+    b.pitch = clamp(Math.atan2(targetY - entEye(b), Math.max(1, d)), -1, 1);
+
+    const weaponSlot = botBestWeaponSlot(b, d);
+    if (weaponSlot > 0 && weaponSlot !== b.slot) b.slot = weaponSlot;
+    const item = curItem(b), weapon = item && WEAPONS[item.id];
+    const baseRange = weapon ? (BOT_WEAPON_RANGES[item.id] || 35) : 18;
+    const roleRange = b.role === 'aggressive' ? 0.78 : b.role === 'marksman' ? 1.28 : b.role === 'survivor' ? 1.08 : 1;
+    const want = clamp(baseRange * roleRange, 7, 120);
+
     b.strafeT -= dt;
-    if (b.strafeT <= 0) { b.strafeT = rnd(0.6, 1.6); b.strafe = Math.random() < 0.5 ? -1 : 1; }
+    if (b.strafeT <= 0) {
+      b.strafeT = rnd(0.55, 1.25) + (1 - b.skill) * 0.35;
+      b.strafe = Math.random() < (b.role === 'aggressive' ? 0.64 : 0.5) ? -1 : 1;
+    }
     const rx = Math.cos(b.yaw), rz = -Math.sin(b.yaw);
     const fx = -Math.sin(b.yaw), fz = -Math.cos(b.yaw);
-    const push = clamp((d - want) / 10, -1, 1);
-    goX = b.pos[0] + fx * push * 6 + rx * b.strafe * 5;
-    goZ = b.pos[2] + fz * push * 6 + rz * b.strafe * 5;
-    // shoot
-    const it = curItem(b);
-    b.aimT -= dt;
-    if (it && !it.melee && WEAPONS[it.id].ammo && d < WEAPONS[it.id].range * 0.7) {
-      if (b.burst > 0 && b.fireT <= 0 && b.reloadT <= 0 && b.aimT <= 0) {
-        const gp = gunPoint(b);
-        const ax = t.pos[0] - gp[0], ay = entEye(t) + rnd(-0.3, 0.3) - gp[1], az = t.pos[2] - gp[2];
-        const l = len3(ax, ay, az) || 1;
-        tryFire(b, ax / l, ay / l, az / l);
-        b.burst--;
-        if (b.burst <= 0) b.aimT = rnd(1.1, 2.5);   // breathe between bursts
-      }
+    if (visible) {
+      const push = clamp((d - want) / Math.max(8, want * 0.72), -1.15, 1.15);
+      const side = (b.role === 'marksman' ? 2.8 : 4.6) + b.skill * 1.6;
+      goX = b.pos[0] + fx * push * 6.4 + rx * b.strafe * side;
+      goZ = b.pos[2] + fz * push * 6.4 + rz * b.strafe * side;
+
+      // Small lead helps against sprinting targets without giving bots perfect tracking.
+      b.aimT -= dt;
+      if (weapon && !weapon.melee && weapon.ammo && d < weapon.range * 0.84) {
+        if (b.burst > 0 && b.fireT <= 0 && b.reloadT <= 0 && b.aimT <= 0) {
+          const gp = gunPoint(b);
+          const lead = clamp(d / 180 * (0.08 + b.skill * 0.16), 0.03, 0.24);
+          const error = (1 - b.skill) * 0.48;
+          const ax = t.pos[0] + t.vel[0] * lead + rnd(-error, error) - gp[0];
+          const ay = entEye(t) + t.vel[1] * lead * 0.12 + rnd(-error * 0.45, error * 0.45) - gp[1];
+          const az = t.pos[2] + t.vel[2] * lead + rnd(-error, error) - gp[2];
+          const l = len3(ax, ay, az) || 1;
+          tryFire(b, ax / l, ay / l, az / l);
+          b.burst--;
+          if (b.burst <= 0) b.aimT = rnd(0.72, 1.55) - b.skill * 0.22;
+        }
+      } else b.burst = 0;
+    } else {
+      // Lost sight: move toward the last place seen and try to find another angle.
+      b.burst = 0;
+      const push = clamp((d - 5) / 9, 0, 1);
+      goX = b.pos[0] + fx * push * 7.2 + rx * b.strafe * 2.5;
+      goZ = b.pos[2] + fz * push * 7.2 + rz * b.strafe * 2.5;
+      sprint = d > 12;
     }
-    // panic wall
-    if (b.hp + b.shield < 70 && b.wallT <= 0 && b.mats[b.buildMat] >= BUILD_COST && b.grounded) {
-      b.buildType = Math.random() < 0.75 ? 0 : 2;
-      if (tryBuild(b)) b.wallT = rnd(2.5, 5);
+
+    // A little evasive movement when hit; higher-skill bots time it more often.
+    if (b.hurtT > 0 && b.grounded && b.dodgeT <= 0 && Math.random() < 0.025 + b.skill * 0.035) {
+      b.vel[1] = rnd(7.8, 9.6);
+      b.dodgeT = rnd(0.85, 1.4);
     }
-  } else {                                                               // loot / wander
+
+    // Build a panic wall sooner, and occasionally a ramp to change the angle.
+    if (b.hp + b.shield < 82 && b.wallT <= 0 && b.mats[b.buildMat] >= BUILD_COST && b.grounded) {
+      b.buildType = Math.random() < 0.72 ? 0 : 2;
+      if (tryBuild(b)) b.wallT = rnd(1.8, 3.6);
+    }
+  } else {
     goX = b.wander[0]; goZ = b.wander[1];
     if (dist2(b.pos[0], b.pos[2], goX, goZ) < 9) { interact(b); botPickWander(b); }
     autoPickup(b);
-    // heal and shield up out of combat, from items they actually carry
+    // Heal and shield up between fights, using items actually carried.
     if (b.useT <= 0) {
-      const want = b.hp < 60 ? 'medkit' : b.shield < 75 ? 'shield' : null;
+      const want = b.hp < 65 ? 'medkit' : b.shield < 78 ? 'shield' : null;
       const i = want ? b.inv.findIndex((x, ix) => ix > 0 && x && x.id === want) : -1;
       if (i > 0) { b.useT = want === 'shield' ? 2.2 : 3.6; b.useKind = want; b.useSlot = i; playUpper(b, 'Use_Item', b.useT); }
     }
-    // harvest for real: only gain mats from a prop actually within reach
+    // Harvest for real: only gain mats from a prop actually within reach.
     b.harvestT = (b.harvestT || 0) - dt;
     if (b.harvestT <= 0) {
       b.harvestT = 1.2;
@@ -1275,12 +1364,11 @@ function updateBot(b, dt) {
   }
   b.wallT -= dt;
 
-  // move
   let mvx = 0, mvz = 0;
   if (goX !== null) {
     const dx = goX - b.pos[0], dz = goZ - b.pos[2];
     const l = len2(dx, dz);
-    if (l > 0.6) { mvx = dx / l; mvz = dz / l; if (!b.target) b.yaw = Math.atan2(-mvx, -mvz); }
+    if (l > 0.6) { mvx = dx / l; mvz = dz / l; if (!b.target || !b.target.alive) b.yaw = Math.atan2(-mvx, -mvz); }
   }
   const spd = sprint ? 10.2 : 7.4;
   b.vel[0] += (mvx * spd - b.vel[0]) * Math.min(1, 50 * dt);
@@ -1293,9 +1381,8 @@ function updateBot(b, dt) {
   if ((mvx || mvz) && moved < 0.0004) {
     b.stuckT += dt;
     if (b.stuckT > 0.35) {
-      if (b.grounded) b.vel[1] = 9.4;                                    // hop over it
+      if (b.grounded) b.vel[1] = 9.4;
       if (b.stuckT > 1.1) { botPickWander(b); b.stuckT = 0; }
-      // build a ramp out of trouble
       if (b.grounded && b.mats[b.buildMat] >= BUILD_COST && Math.random() < 0.35) {
         b.buildType = 2; tryBuild(b);
       }
@@ -1308,36 +1395,39 @@ function updateBot(b, dt) {
 }
 
 function botThink(b) {
-  let best = null, bd = 65 * 65;
+  let best = null, bd = 92 * 92;
   for (const e of G.ents) {
-    if (e === b || !e.alive || e.pos[1] > TERRAIN_MAX + 40) continue;   // still in the air
+    if (e === b || !e.alive || e.pos[1] > TERRAIN_MAX + 40) continue;
     const d = dist2(b.pos[0], b.pos[2], e.pos[0], e.pos[2]);
     if (d < bd && losClear(b.pos[0], entEye(b), b.pos[2], e.pos[0], entEye(e), e.pos[2])) { bd = d; best = e; }
   }
-  // An unarmed bot ignores anyone who isn't already on top of it — getting a gun
-  // beats swinging a pickaxe at someone 40m away.
-  b.target = (best && (botHasGun(b) || bd < 12 * 12)) ? best : null;
-  best = b.target;
-  if (best && b.burst <= 0 && Math.random() < 0.55 + b.skill * 0.4) b.burst = 2 + ((Math.random() * 5) | 0);
-  if (!best) b.burst = 0;
-  // hold the best thing they actually own (no conjuring — they have to loot)
-  if (!curItem(b) || curItem(b).id === 'pickaxe' || curItem(b).id === 'shield' || curItem(b).id === 'medkit') {
-    const gun = b.inv.findIndex((x, i) => i > 0 && x && WEAPONS[x.id] && WEAPONS[x.id].ammo);
-    if (gun > 0) b.slot = gun;
+  if (best) {
+    b.target = best;
+    b.lastSeenX = best.pos[0]; b.lastSeenZ = best.pos[2]; b.lastSeenY = entEye(best);
+    b.targetMemory = 2.1 + b.skill * 1.1;
+  } else if (!b.target || !b.target.alive || b.targetMemory <= 0) {
+    b.target = null; b.burst = 0;
   }
-  b.lootTarget = botHasGun(b) ? null : findLootTarget(b, 80);
-  if (!b.wander[0] && !b.wander[1]) botPickWander(b);
+  const distance = b.target && b.target.alive
+    ? Math.sqrt(dist2(b.pos[0], b.pos[2], b.target.pos[0], b.target.pos[2])) : 45;
+  const slot = botBestWeaponSlot(b, distance);
+  if (slot > 0) b.slot = slot;
+  b.lootTarget = findLootTarget(b, 76);
+  if (b.lootTarget) {
+    b.wander[0] = b.lootTarget[0]; b.wander[1] = b.lootTarget[1];
+  } else if (!b.wander[0] && !b.wander[1]) botPickWander(b);
+  if (b.target && b.target.alive) {
+    if (b.burst <= 0 && Math.random() < 0.48 + b.skill * 0.42) b.burst = 2 + ((Math.random() * 5) | 0);
+  } else b.burst = 0;
 }
 
-function botHasGun(b) {
-  return b.inv.some((x, i) => i > 0 && x && WEAPONS[x.id] && WEAPONS[x.id].ammo);
-}
-
-// Nearest thing worth walking to when you have no gun: dropped weapon or chest.
 function findLootTarget(b, range) {
   let bx = null, bz = null, bd = range * range;
+  const distance = b.target && b.target.alive
+    ? Math.sqrt(dist2(b.pos[0], b.pos[2], b.target.pos[0], b.target.pos[2])) : 42;
   for (const l of World.loot) {
-    if (l.kind !== 'weapon' || l.cool > 0) continue;
+    if (l.kind !== 'weapon' || l.cool > 0 || !l.data || !l.data.item) continue;
+    if (botUpgradeSlot(b, l.data.item, distance) < 1) continue;
     const d = dist2(b.pos[0], b.pos[2], l.x, l.z);
     if (d < bd) { bd = d; bx = l.x; bz = l.z; }
   }
