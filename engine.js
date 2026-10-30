@@ -673,6 +673,7 @@ class Renderer {
     const gl = canvas.getContext('webgl2', { antialias: true, alpha: false, powerPreference: 'high-performance' });
     if (!gl) throw new Error('WebGL2 is required (try Chrome / Firefox / Safari 15+).');
     this.gl = gl; this.canvas = canvas;
+    this.dprCap = 1.5;                 // quality preset controls the maximum device-pixel ratio
 
     // programs — {p, u:{name: location}}; samplers are pinned to fixed units once
     this.progFlat = this._program(VS_INST, FS_MAIN, '');
@@ -1018,15 +1019,28 @@ class Renderer {
     gl.enable(gl.DEPTH_TEST); gl.depthMask(true);
   }
 
-  // Quality presets. Shadows and bloom are the two costs that matter on an
-  // integrated GPU; `scale` renders the scene smaller and lets the post pass
-  // upsample it.
+  // Quality presets balance GPU load, resolution, shadows and post effects.
+  // The Epic preset uses the display's extra pixel density only when available;
+  // lower presets reduce the internal render scale for smoother play on laptops.
   setQuality(preset) {
     const P = this.post;
-    if (preset === 'low') { this.shadowsOn = false; P.on = false; P.bloom = false; P.scale = 0.75; }
-    else if (preset === 'medium') { this.shadowsOn = true; P.on = true; P.bloom = false; P.scale = 1; }
-    else { this.shadowsOn = true; P.on = true; P.bloom = true; P.scale = 1; }
+    if (!['low', 'medium', 'high', 'epic'].includes(preset)) preset = 'high';
+    this.dprCap = preset === 'epic' ? 2.0 : preset === 'high' ? 1.5 : preset === 'medium' ? 1.25 : 1.0;
+    if (preset === 'low') {
+      this.shadowsOn = false; P.on = true; P.bloom = false; P.scale = 0.72;
+      this.bloomK = 0; this.grade.set([1.02, 1.04, 0]);
+    } else if (preset === 'medium') {
+      this.shadowsOn = true; P.on = true; P.bloom = false; P.scale = 0.88;
+      this.bloomK = 0; this.grade.set([1.04, 1.07, 0]);
+    } else if (preset === 'high') {
+      this.shadowsOn = true; P.on = true; P.bloom = true; P.scale = 1;
+      this.bloomK = 0.35; this.bloomThresh = 0.82; this.grade.set([1.06, 1.10, 0]);
+    } else {
+      this.shadowsOn = true; P.on = true; P.bloom = true; P.scale = 1;
+      this.bloomK = 0.46; this.bloomThresh = 0.79; this.grade.set([1.10, 1.16, 0.006]);
+    }
     this.quality = preset;
+    this.resize();
   }
 
   /* ------------------------------- meshes --------------------------------- */
@@ -1249,7 +1263,7 @@ class Renderer {
   /* ------------------------------- frame ---------------------------------- */
 
   resize() {
-    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    const dpr = Math.min(window.devicePixelRatio || 1, this.dprCap || 1.5);
     const w = Math.floor(window.innerWidth * dpr), h = Math.floor(window.innerHeight * dpr);
     if (this.canvas.width !== w || this.canvas.height !== h) {
       this.canvas.width = w; this.canvas.height = h;
