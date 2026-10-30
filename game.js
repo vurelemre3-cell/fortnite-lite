@@ -2795,6 +2795,67 @@ const MANIFEST = (() => {
   return m;
 })();
 
+const GAME_SETTINGS_KEY = 'fortniteLite.settings.v1';
+const GAME_SETTINGS_DEFAULTS = {
+  quality: 'high', fov: 90, sensitivity: 0.0022,
+  master: 50, sfx: 100, music: 35, showPerf: false,
+};
+function readGameSettings() {
+  const s = Object.assign({}, GAME_SETTINGS_DEFAULTS);
+  try {
+    const saved = JSON.parse(localStorage.getItem(GAME_SETTINGS_KEY) || 'null');
+    if (saved && typeof saved === 'object') {
+      if (['low', 'medium', 'high', 'epic'].includes(saved.quality)) s.quality = saved.quality;
+      if (Number.isFinite(+saved.fov)) s.fov = Math.max(75, Math.min(105, +saved.fov));
+      if (Number.isFinite(+saved.sensitivity)) s.sensitivity = Math.max(0.001, Math.min(0.0045, +saved.sensitivity));
+      for (const k of ['master', 'sfx', 'music']) if (Number.isFinite(+saved[k])) s[k] = Math.max(0, Math.min(100, +saved[k]));
+      s.showPerf = saved.showPerf === true;
+    }
+  } catch (e) { /* storage may be disabled; defaults still work */ }
+  return s;
+}
+function setupSettings() {
+  const ids = ['qualitySetting', 'fovSetting', 'sensitivitySetting', 'masterSetting', 'sfxSetting', 'musicSetting', 'perfSetting'];
+  const els = Object.fromEntries(ids.map(id => [id, document.getElementById(id)]));
+  const saved = readGameSettings();
+  els.qualitySetting.value = saved.quality;
+  els.fovSetting.value = saved.fov;
+  els.sensitivitySetting.value = saved.sensitivity;
+  els.masterSetting.value = saved.master;
+  els.sfxSetting.value = saved.sfx;
+  els.musicSetting.value = saved.music;
+  els.perfSetting.checked = saved.showPerf;
+
+  const apply = () => {
+    const settings = {
+      quality: els.qualitySetting.value,
+      fov: Math.max(75, Math.min(105, +els.fovSetting.value || 90)),
+      sensitivity: Math.max(0.001, Math.min(0.0045, +els.sensitivitySetting.value || 0.0022)),
+      master: Math.max(0, Math.min(100, +els.masterSetting.value || 0)),
+      sfx: Math.max(0, Math.min(100, +els.sfxSetting.value || 0)),
+      music: Math.max(0, Math.min(100, +els.musicSetting.value || 0)),
+      showPerf: els.perfSetting.checked,
+    };
+    R.setQuality(settings.quality);
+    Input.sens = settings.sensitivity;
+    FOV.base = settings.fov * Math.PI / 180;
+    Sfx.setVolume(settings.master / 100, settings.sfx / 100, settings.music / 100);
+    G.showPerf = settings.showPerf;
+    document.getElementById('fovValue').textContent = settings.fov + '°';
+    document.getElementById('sensitivityValue').textContent = settings.sensitivity.toFixed(4);
+    document.getElementById('masterValue').textContent = settings.master + '%';
+    document.getElementById('sfxValue').textContent = settings.sfx + '%';
+    document.getElementById('musicValue').textContent = settings.music + '%';
+    try { localStorage.setItem(GAME_SETTINGS_KEY, JSON.stringify(settings)); } catch (e) { /* optional persistence */ }
+  };
+  for (const id of ['fovSetting', 'sensitivitySetting', 'masterSetting', 'sfxSetting', 'musicSetting']) {
+    els[id].addEventListener('input', apply);
+  }
+  els.qualitySetting.addEventListener('change', apply);
+  els.perfSetting.addEventListener('change', apply);
+  apply();
+}
+
 function boot() {
   const canvas = document.getElementById('gl');
   hudCv = document.getElementById('hud');
@@ -2809,6 +2870,7 @@ function boot() {
     return;
   }
   Input.attach(canvas);
+  setupSettings();
   World.ents = G.ents;
 
   // procedural materials + the textured meshes the build pieces are drawn with
