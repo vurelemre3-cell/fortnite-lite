@@ -59,6 +59,29 @@
   #playerList div { padding:4px 10px; background:rgba(0,0,0,.25); border-radius:4px; text-align:left; }
   #botsRow { font-size:13px; opacity:.85; display:flex; gap:8px; align-items:center; }
   #waitMsg { font-size:13px; opacity:.7; }
+  #settingsPanel { width:min(560px,92vw); border:1px solid rgba(127,216,255,.24);
+    border-radius:9px; background:rgba(5,13,27,.72); text-align:left; }
+  #settingsPanel summary { cursor:pointer; list-style:none; padding:11px 16px;
+    color:#bfeaff; font-size:12px; font-weight:900; letter-spacing:.18em; text-align:center; }
+  #settingsPanel summary::-webkit-details-marker { display:none; }
+  #settingsPanel summary::after { content:'  +'; color:var(--gold); }
+  #settingsPanel[open] summary::after { content:'  −'; }
+  .settings-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px 16px;
+    padding:4px 16px 12px; }
+  .settings-grid label { min-width:0; display:flex; flex-direction:column; gap:6px;
+    color:#dcecff; font-size:11px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; }
+  .settings-grid label span { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+  .settings-grid output { color:var(--gold); font-variant-numeric:tabular-nums; }
+  .settings-grid select { width:100%; min-width:0; padding:7px 9px; border:1px solid rgba(255,255,255,.16);
+    border-radius:5px; color:#fff; background:#101d31; font:700 13px system-ui,sans-serif; }
+  .settings-grid input[type=range] { width:100%; accent-color:#54c7ff; }
+  .settings-grid .check-setting { flex-direction:row; align-items:center; gap:9px; align-self:end; padding:8px 0; }
+  .settings-grid .check-setting input { accent-color:#54c7ff; width:16px; height:16px; }
+  .settings-foot { margin:0; padding:0 16px 12px; color:#9db2c8; font-size:10px; text-align:center; }
+  @media(max-width:560px) {
+    .settings-grid { grid-template-columns:1fr 1fr; gap:8px 12px; padding-left:12px; padding-right:12px; }
+    #settingsPanel summary { padding:9px 12px; }
+  }
 </style>
 </head>
 <body>
@@ -69,6 +92,36 @@
   <h1>FORTNITE LITE</h1>
   <p class="sub">24 players · build · storm · last one standing · solo or with friends</p>
   <button id="playBtn">DROP IN</button>
+  <details id="settingsPanel">
+    <summary>GAME SETTINGS</summary>
+    <div class="settings-grid">
+      <label><span>Graphics quality</span>
+        <select id="qualitySetting">
+          <option value="low">Performance</option>
+          <option value="medium">Balanced</option>
+          <option value="high">High</option>
+          <option value="epic">Epic</option>
+        </select>
+      </label>
+      <label><span>Field of view <output id="fovValue">90°</output></span>
+        <input id="fovSetting" type="range" min="75" max="105" step="1" value="90">
+      </label>
+      <label><span>Mouse sensitivity <output id="sensitivityValue">0.0022</output></span>
+        <input id="sensitivitySetting" type="range" min="0.001" max="0.0045" step="0.0001" value="0.0022">
+      </label>
+      <label><span>Master volume <output id="masterValue">50%</output></span>
+        <input id="masterSetting" type="range" min="0" max="100" step="1" value="50">
+      </label>
+      <label><span>Sound effects <output id="sfxValue">100%</output></span>
+        <input id="sfxSetting" type="range" min="0" max="100" step="1" value="100">
+      </label>
+      <label><span>Music <output id="musicValue">35%</output></span>
+        <input id="musicSetting" type="range" min="0" max="100" step="1" value="35">
+      </label>
+      <label class="check-setting"><input id="perfSetting" type="checkbox"> Show FPS &amp; performance</label>
+    </div>
+    <p class="settings-foot">Your settings are saved automatically on this device.</p>
+  </details>
   <div id="lobby">
     <h3>Play with friends</h3>
     <div id="lobbyJoin">
