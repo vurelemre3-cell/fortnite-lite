@@ -349,5 +349,33 @@ console.log('14. a solo match pauses while the mouse is not captured; a lobby ma
   Net.inMatch = false;
 }
 
+console.log('15. new weapon pool contains complete stats, recoil and 3D models');
+{
+  ok(GUN_IDS.length === 10, 'the loot pool contains ten guns');
+  ok(new Set(GUN_IDS).size === GUN_IDS.length, 'weapon ids are unique');
+  for (const id of GUN_IDS) {
+    ok(!!WEAPONS[id] && !!WEAPONS[id].ammo && WEAPONS[id].mag > 0 && WEAPONS[id].range > 0, id + ' has complete firing data');
+    ok(!!WEAPONS[id].recoil, id + ' has a recoil profile');
+    ok(Array.isArray(GUN_MODEL[id]) && GUN_MODEL[id].length > 0, id + ' has its own 3D model');
+  }
+}
+console.log('16. bots choose a weapon for the current engagement distance');
+{
+  const bot = makeEntity(true, 'Test Bot', [1, 0, 0], 'char_knight');
+  bot.ammo = { light: 120, medium: 90, shells: 24 };
+  bot.inv = [
+    { id: 'pickaxe', rar: 0, mag: 0 },
+    { id: 'shotgun', rar: 2, mag: 5 },
+    { id: 'heavyAR', rar: 2, mag: 25 },
+    { id: 'dmr', rar: 2, mag: 12 },
+    { id: 'sniper', rar: 2, mag: 1 },
+  ];
+  ok(botBestWeaponSlot(bot, 8) === 1, 'close-range combat selects the pump shotgun');
+  ok(botBestWeaponSlot(bot, 150) === 4, 'long-range combat selects the sniper');
+  bot.inv[3].mag = 0; bot.inv[4].mag = 0; bot.ammo.medium = 0;
+  ok(botBestWeaponSlot(bot, 150) === 2, 'unloaded long-range guns are skipped');
+  const upgrade = { id: 'dmr', rar: 4, mag: 12 };
+  ok(botUpgradeSlot(bot, upgrade, 100) === 3, 'a bot can replace an empty weapon with a loaded upgrade');
+}
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
