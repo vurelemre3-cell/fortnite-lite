@@ -1958,10 +1958,11 @@ const Sfx = {
   // pump and bolt get a longer, deeper report. `vol` is the distance falloff.
   shoot(kind, vol) {
     const v = vol === undefined ? 1 : vol;
-    if (kind === 'shotgun') { this.noise(0.32, 0.55 * v, 600, 0.6); this.noise(0.12, 0.35 * v, 3000, 0.7); this.tone(95, 0.22, 'sine', 0.35 * v, 35); }
-    else if (kind === 'sniper') { this.noise(0.42, 0.5 * v, 1000, 0.7); this.tone(160, 0.3, 'square', 0.14 * v, 40); this.tone(60, 0.35, 'sine', 0.3 * v, 30); }
-    else if (kind === 'pistol') { this.noise(0.1, 0.32 * v, 1800, 1.0); this.tone(240, 0.07, 'square', 0.09 * v, 90); this.tone(80, 0.09, 'sine', 0.2 * v, 40); }
-    else if (kind === 'smg') { this.noise(0.07, 0.26 * v, 2200, 1.2); this.tone(300, 0.05, 'square', 0.08 * v, 140); this.tone(100, 0.06, 'sine', 0.12 * v, 50); }
+    if (kind === 'shotgun' || kind === 'autoShotgun') { this.noise(0.32, 0.55 * v, 600, 0.6); this.noise(0.12, 0.35 * v, 3000, 0.7); this.tone(95, 0.22, 'sine', 0.35 * v, 35); }
+    else if (kind === 'sniper' || kind === 'dmr') { this.noise(0.42, 0.5 * v, 1000, 0.7); this.tone(160, 0.3, 'square', 0.14 * v, 40); this.tone(60, 0.35, 'sine', 0.3 * v, 30); }
+    else if (kind === 'pistol' || kind === 'revolver') { this.noise(0.1, kind === 'revolver' ? 0.40 * v : 0.32 * v, 1800, 1.0); this.tone(240, 0.07, 'square', 0.09 * v, 90); this.tone(80, 0.09, 'sine', 0.2 * v, 40); }
+    else if (kind === 'smg' || kind === 'tacsmg') { this.noise(0.07, 0.26 * v, 2200, 1.2); this.tone(300, 0.05, 'square', 0.08 * v, 140); this.tone(100, 0.06, 'sine', 0.12 * v, 50); }
+    else if (kind === 'heavyAR') { this.noise(0.14, 0.39 * v, 1200, 0.85); this.tone(180, 0.10, 'square', 0.10 * v, 60); this.tone(72, 0.12, 'sine', 0.19 * v, 34); }
     else { this.noise(0.1, 0.32 * v, 1500, 1.1); this.tone(280, 0.06, 'square', 0.1 * v, 110); this.tone(90, 0.1, 'sine', 0.2 * v, 40); }
   },
   // Hit tick: higher for a headshot, a glassy crack when the shield breaks.
