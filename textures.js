@@ -184,9 +184,10 @@ const Textures = {
     t.wood = R.texture(texWood(256));
     t.brick = R.texture(texBrick(256));
     t.metal = R.texture(texMetal(256));
-    t.grass = R.texture(texGrass(256));
-    t.rock = R.texture(texRock(256));
-    t.dirt = R.texture(texDirt(256));
+    // Higher-resolution terrain detail is most visible while sprinting over hills.
+    t.grass = R.texture(texGrass(512));
+    t.rock = R.texture(texRock(512));
+    t.dirt = R.texture(texDirt(512));
     t.noise = R.texture(texNoise(256), { aniso: false });
     t.medkit = R.texture(texMedkit(128));
     t.ammo = R.texture(texAmmo(128));
