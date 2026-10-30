@@ -86,6 +86,8 @@ function makeEntity(isBot, name, color, skin) {
     anim: null, upper: null, xf: new Float32Array(16), animPhase: Math.random() * 3,
     // bot brain
     think: 0, target: null, wander: [0, 0], strafe: 1, strafeT: 0, stuckT: 0, wallT: 0, burst: 0, aimT: 0,
+    targetMemory: 0, lastSeenX: null, lastSeenZ: null, lastSeenY: null,
+    dodgeT: 0, role: 'tactical',
     skill: 0.5, landing: null, glide: false,
   };
 }
@@ -140,7 +142,9 @@ function newMatch(setup) {
       const b = makeEntity(true, n, [rnd(0.35, 0.95), rnd(0.3, 0.9), rnd(0.35, 0.95)], pick(CHAR_SKINS));
       b.id = 1000 + i;          // far above any lobby id the relay could ever hand out
       b.remote = !World.authority;
-      b.skill = rnd(0.25, 0.85);
+      b.skill = rnd(0.34, 0.92);
+      b.role = pick(['aggressive', 'tactical', 'marksman', 'survivor']);
+      b.think = rnd(0.02, 0.25);
       b.shield = Math.round(rnd(0, BOT_SHIELD));
       b.mats = [rnd(60, 180) | 0, rnd(0, 80) | 0, 0];
       // spread landings out — a whole lobby landing on one roof is a bloodbath
@@ -1744,6 +1748,15 @@ const GUN_MODEL = {
     [C, 0, 0.06, 0.36, 0.09, 0.14, 0.20, 'dark'],    // stubby stock
     [C, 0, 0.19, -0.05, 0.04, 0.06, 0.18, 'dark'],   // sight rail
   ],
+  tacsmg: [
+    [C, 0, 0.08, 0.02, 0.13, 0.18, 0.55, 'dark'],
+    [T, 0, 0.09, -0.54, 0.065, 0.065, 0.34, 'metal'],
+    [T, 0, 0.09, -0.25, 0.13, 0.13, 0.26, 'acc'],
+    [C, 0, -0.17, 0.00, 0.11, 0.34, 0.18, 'acc'],
+    [C, 0, -0.12, 0.20, 0.09, 0.23, 0.12, 'dark'],
+    [C, 0, 0.07, 0.38, 0.10, 0.16, 0.23, 'dark'],
+    [C, 0, 0.20, -0.06, 0.04, 0.06, 0.22, 'acc'],
+  ],
   ar: [
     [C, 0, 0.09, 0.00, 0.12, 0.20, 0.72, 'dark'],    // receiver
     [T, 0, 0.10, -0.72, 0.06, 0.06, 0.60, 'metal'],  // barrel
@@ -1762,6 +1775,14 @@ const GUN_MODEL = {
     [C, 0, -0.12, 0.24, 0.09, 0.22, 0.12, 'dark'],   // grip
     [C, 0, 0.03, 0.52, 0.12, 0.21, 0.40, 'acc'],     // wide stock
   ],
+  autoShotgun: [
+    [C, 0, 0.10, 0.02, 0.16, 0.23, 0.55, 'dark'],
+    [T, 0, 0.14, -0.63, 0.12, 0.12, 0.76, 'metal'],
+    [C, 0, -0.17, -0.06, 0.20, 0.28, 0.27, 'acc'],
+    [C, 0, -0.13, 0.20, 0.10, 0.22, 0.12, 'dark'],
+    [C, 0, 0.04, 0.49, 0.13, 0.20, 0.35, 'acc'],
+    [T, 0, 0.26, -0.07, 0.10, 0.10, 0.16, 'dark'],
+  ],
   sniper: [
     [C, 0, 0.08, 0.00, 0.11, 0.18, 0.70, 'dark'],    // receiver
     [T, 0, 0.09, -0.92, 0.05, 0.05, 1.00, 'metal'],  // very long barrel
@@ -1772,6 +1793,34 @@ const GUN_MODEL = {
     [C, 0, -0.12, 0.20, 0.09, 0.22, 0.10, 'dark'],   // grip
     [C, 0, 0.03, 0.56, 0.11, 0.20, 0.46, 'acc'],     // long stock
     [T, 0, 0.09, -1.46, 0.08, 0.08, 0.12, 'dark'],   // muzzle brake
+  ],
+  heavyAR: [
+    [C, 0, 0.09, 0.03, 0.15, 0.23, 0.76, 'dark'],
+    [T, 0, 0.10, -0.73, 0.075, 0.075, 0.66, 'metal'],
+    [T, 0, 0.10, -0.43, 0.15, 0.15, 0.38, 'acc'],
+    [C, 0, -0.18, -0.03, 0.12, 0.33, 0.17, 'acc'],
+    [C, 0, -0.13, 0.18, 0.10, 0.25, 0.12, 'dark'],
+    [C, 0, 0.07, 0.56, 0.12, 0.20, 0.34, 'acc'],
+    [C, 0, 0.27, -0.12, 0.065, 0.10, 0.28, 'dark'],
+    [T, 0, 0.10, -1.03, 0.10, 0.10, 0.12, 'dark'],
+  ],
+  dmr: [
+    [C, 0, 0.09, 0.02, 0.12, 0.20, 0.76, 'dark'],
+    [T, 0, 0.10, -0.98, 0.055, 0.055, 0.96, 'metal'],
+    [T, 0, 0.30, -0.16, 0.12, 0.12, 0.52, 'dark'],
+    [C, 0, 0.21, -0.08, 0.06, 0.10, 0.26, 'acc'],
+    [C, 0, -0.16, 0.00, 0.10, 0.24, 0.17, 'acc'],
+    [C, 0, -0.12, 0.21, 0.09, 0.22, 0.11, 'dark'],
+    [C, 0, 0.04, 0.58, 0.11, 0.18, 0.44, 'acc'],
+    [T, 0, 0.10, -1.42, 0.08, 0.08, 0.13, 'dark'],
+  ],
+  revolver: [
+    [C, 0, 0.07, -0.06, 0.11, 0.14, 0.36, 'dark'],
+    [T, 0, 0.08, -0.36, 0.055, 0.055, 0.28, 'metal'],
+    [T, 0, 0.04, 0.00, 0.15, 0.15, 0.23, 'acc'],
+    [C, 0, -0.15, 0.13, 0.11, 0.27, 0.14, 'acc'],
+    [C, 0, -0.04, 0.08, 0.035, 0.08, 0.10, 'dark'],
+    [C, 0, 0.18, -0.09, 0.045, 0.05, 0.15, 'dark'],
   ],
   pickaxe: [
     [C, 0, -0.10, 0.00, 0.06, 1.10, 0.06, 'wood'],   // handle, along Y
@@ -2224,9 +2273,12 @@ function drawItemIcon(id, x, y, w, h, col) {
   if (id === 'pickaxe') { hud.strokeStyle = col; hud.lineWidth = 2; hud.beginPath(); hud.moveTo(3 * u, 11 * v); hud.lineTo(15 * u, 2 * v); hud.stroke(); rect(11, 0, 9, 2.4); rect(16, 0, 2.4, 6); }
   else if (id === 'pistol') { rect(4, 3, 12, 3); rect(5, 6, 3.5, 5); rect(15, 3.6, 4, 1.8); }
   else if (id === 'smg') { rect(3, 4, 12, 3); rect(6, 7, 3, 4.5); rect(15, 4.4, 4, 1.6); rect(1, 4.4, 2.5, 2); rect(10, 2.5, 3, 1.5); }
+  else if (id === 'tacsmg') { rect(2, 4, 13, 3); rect(6, 7, 3, 4.5); rect(15, 4.7, 5, 1.4); rect(0, 4.5, 2, 2); rect(10, 2.5, 4, 1.5); }
   else if (id === 'ar') { rect(4, 4, 11, 3); rect(9, 7, 2.6, 4); rect(15, 4.6, 5, 1.6); rect(0, 4.5, 4, 2.2); rect(8, 2.6, 4, 1.4); }
-  else if (id === 'shotgun') { rect(4, 4.5, 10, 2.6); rect(14, 4.6, 6, 2); rect(0, 4.8, 4, 2.6); rect(11, 7, 3, 1.6); }
-  else if (id === 'sniper') { rect(3, 5, 10, 2.4); rect(13, 5.4, 7, 1.4); rect(0, 5.2, 3, 2.2); rect(7, 2.6, 5, 1.8); rect(6, 7.4, 2, 3); }
+  else if (id === 'heavyAR') { rect(3, 4, 12, 3.2); rect(9, 7, 3.2, 4.5); rect(15, 4.7, 5, 1.8); rect(0, 4.7, 3, 2.3); rect(8, 2.3, 5, 1.7); }
+  else if (id === 'shotgun' || id === 'autoShotgun') { rect(4, 4.5, 10, 2.6); rect(14, 4.6, 6, 2); rect(0, 4.8, 4, 2.6); rect(11, 7, 3, 1.6); if (id === 'autoShotgun') rect(7, 7, 4, 3); }
+  else if (id === 'sniper' || id === 'dmr') { rect(3, 5, 10, 2.4); rect(13, 5.4, 7, 1.4); rect(0, 5.2, 3, 2.2); rect(7, 2.6, 5, 1.8); rect(6, 7.4, 2, 3); }
+  else if (id === 'revolver') { rect(4, 4, 11, 2.5); rect(8, 6, 4, 3); rect(3, 4.2, 3, 2); rect(15, 4.4, 5, 1.4); rect(6, 7, 3, 4); }
   else if (id === 'shield') { rect(8, 4, 4, 7); rect(8.8, 1.5, 2.4, 2.8); hud.fillStyle = '#fff'; rect(8.8, 6, 1, 3); }
   else if (id === 'medkit') { rect(4, 3, 12, 8); hud.fillStyle = '#e33'; rect(9, 4, 2, 6); rect(6.5, 6, 7, 2); }
   hud.restore();
