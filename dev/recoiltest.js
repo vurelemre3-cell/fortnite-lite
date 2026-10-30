@@ -104,11 +104,16 @@ function burst(gun, fps, hold, opts) {
 // snappy; shotgun a single punchy kick gone before the pump; sniper a real 2–3° kick
 // back in ~0.5 s.
 const TARGET = {
-  pistol:  { peak: 1.0, rec: 0.30 },
-  smg:     { peak: 1.3, rec: 0.30 },
-  ar:      { peak: 1.6, rec: 0.35 },
-  shotgun: { peak: 2.2, rec: 0.60, min: 1.0 },
-  sniper:  { peak: 3.4, rec: 0.65, min: 2.0 },
+  pistol:      { peak: 1.0, rec: 0.30 },
+  smg:         { peak: 1.3, rec: 0.30 },
+  tacsmg:      { peak: 1.35, rec: 0.38 },
+  ar:          { peak: 1.6, rec: 0.35 },
+  heavyAR:     { peak: 1.8, rec: 0.48 },
+  shotgun:     { peak: 2.2, rec: 0.60, min: 1.0 },
+  autoShotgun: { peak: 2.35, rec: 0.75, min: 0.65 },
+  sniper:      { peak: 3.4, rec: 0.65, min: 2.0 },
+  dmr:         { peak: 2.0, rec: 0.72, min: 0.65 },
+  revolver:    { peak: 1.9, rec: 0.62, min: 0.65 },
 };
 const FPS = [30, 60, 144];
 console.log('1. trigger held 2 s (or a magazine) at 30 / 60 / 144 fps, no compensation');
