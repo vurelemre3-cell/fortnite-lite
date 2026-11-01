@@ -114,7 +114,7 @@ const Net = {
         if (this.inMatch) { this.onEnd(null, 'HOST LEFT'); this.inMatch = false; this.pendingTake.clear(); }
         if (this.ui) this.ui.render();
         break;
-      case 'err': if (this.ui) this.ui.err(m.msg); break;
+      case 'err': if (this.ui) { this.ui.err(m.msg); this.ui.render(); } break;
       case 'from': this.onGame(m.id, m.d); break;
     }
   },
@@ -124,7 +124,10 @@ const Net = {
     for (const p of before) {
       if (this.players.some(q => q.id === p.id)) continue;
       const e = entById(p.id);
-      if (e && e.alive && e !== G.player) eliminate(e, null, true);
+      if (e && e.alive && e !== G.player) {
+        eliminate(e, null, true);
+        if (G.mode === 'rumble') e.respawnT = 0; // disconnected players must not respawn as bots
+      }
     }
   },
 
@@ -233,7 +236,7 @@ const Net = {
           if (d.k === 'shield') e.shield = Math.min(100, e.shield + 50); else e.hp = Math.min(100, e.hp + 100);
         }
         break;
-      case 'quit': if (this.hosting && e && e.alive) eliminate(e, null, true); break;
+      case 'quit': if (this.hosting && e && e.alive) { eliminate(e, null, true); if (G.mode === 'rumble') e.respawnT = 0; } break;
 
       // ---- the host's word
       case 'snap': if (fromHost) this.applySnap(d); break;
