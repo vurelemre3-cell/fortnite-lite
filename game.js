@@ -217,6 +217,36 @@ function newMatch(setup) {
 
 function entById(id) { for (const e of G.ents) if (e.id === id) return e; return null; }
 
+function respawnEntity(e, data) {
+  if (!e || G.mode !== 'rumble') return;
+  e.alive = true; e.hp = 100; e.shield = 50; e.deadT = 0; e.respawnT = 0;
+  e.pos[0] = data.x; e.pos[1] = data.y === undefined ? terrainHeight(data.x, data.z) + 0.05 : data.y; e.pos[2] = data.z;
+  e.vel.fill(0); e.yaw = data.yaw || 0; e.pitch = 0;
+  e.grounded = true; e.landed = true; e.glide = false; e.sprint = false;
+  e.useT = 0; e.useKind = null; e.fireT = 0; e.reloadT = 0; e.hurtT = 0;
+  e.buildMode = false; e.mats = [500, 500, 500];
+  e.ammo = { light: 120, medium: 180, shells: 48 };
+  if (!e.inv[1] || !WEAPONS[e.inv[1].id]) e.inv[1] = { id: 'ar', rar: 1, mag: WEAPONS.ar.mag };
+  if (!e.inv[2] || !WEAPONS[e.inv[2].id]) e.inv[2] = { id: 'shotgun', rar: 1, mag: WEAPONS.shotgun.mag };
+  e.slot = 1; e.upper = null;
+  if (e.anim && e.anim.play) e.anim.play('Idle_A', 0.12, true);
+  G.alive++;
+}
+function tickRespawns(dt) {
+  if (!World.authority || G.mode !== 'rumble' || G.matchEnded) return;
+  for (const e of G.ents) {
+    if (e.alive || !(e.respawnT > 0)) continue;
+    e.respawnT = Math.max(0, e.respawnT - dt);
+    if (e.respawnT > 0) continue;
+    const blue = e.team === 1;
+    const x = (blue ? -105 : 105) + rnd(-12, 12);
+    const z = rnd(-34, 34);
+    const data = { x, z, y: terrainHeight(x, z) + 0.05, yaw: blue ? -Math.PI / 2 : Math.PI / 2 };
+    respawnEntity(e, data);
+    if (Net.hosting) Net.respawn(e, data);
+  }
+}
+
 function newStorm() {
   if (G.mode === 'rumble') {
     G.storm = { cx: 0, cz: 0, r: HALF * 2, tcx: 0, tcz: 0, tr: HALF * 2, phase: STORM_PHASES.length, timer: STORM_DONE_T, shrinking: false, dps: 0, r0: HALF * 2, tickT: 0 };
@@ -377,14 +407,17 @@ function hurtFrom(x, z) {
 
 function eliminate(e, attacker, byStorm, placement) {
   if (!e.alive) return;
+  const rumble = G.mode === 'rumble';
   e.alive = false; e.hp = 0; e.deadT = 0;
-  e.glide = false;            // shot out of the air: the body falls without its canopy
+  e.respawnT = rumble ? 4.0 : 0;
+  e.glide = false;
   if (e.anim) e.anim.play('Death_A', 0.08, false, true);
   e.upper = null;
-  G.alive--;
+  G.alive = Math.max(0, G.alive - 1);
   if (attacker && attacker !== e) attacker.kills++;
-  // everything they were carrying bursts out of them where they fell
-  if (World.authority) {
+
+  // Team Rumble keeps the loadout and sends eliminated players back to their base.
+  if (World.authority && !rumble) {
     const spill = [];
     for (let i = 1; i < 5; i++) if (e.inv[i]) spill.push(e.inv[i]);
     for (const it of spill) {
@@ -400,25 +433,51 @@ function eliminate(e, attacker, byStorm, placement) {
         rnd(-3, 3), rnd(4.5, 7), rnd(-3, 3), 0.4);
     }
   }
+
+  if (rumble && attacker && attacker.team && attacker.team !== e.team && World.authority) {
+    G.teamScores[attacker.team - 1] = (G.teamScores[attacker.team - 1] || 0) + 1;
+  }
   spawnParticles(e.pos[0], e.pos[1] + 1.0, e.pos[2], 18, [0.95, 0.35, 0.35], 5, 0.16, 0.7, 14);
   addFeed(byStorm ? 'Storm' : (attacker ? attacker.name : '???'), e.name);
   if (Net.hosting) Net.elim(e, attacker, byStorm, G.alive + 1);
 
   if (e === G.player) {
-    G.placement = placement || G.alive + 1;
-    G.state = 'dead';
+    if (rumble) {
+      say('ELIMINATED — RESPAWNING IN 4 SECONDS');
+    } else {
+      G.placement = placement || G.alive + 1;
+      G.state = 'dead';
+      if (document.pointerLockElement) document.exitPointerLock();
+    }
     Sfx.elim();
-    if (document.pointerLockElement) document.exitPointerLock();
   } else if (attacker === G.player) {
     G.elimFlash = 1.7; G.elimName = e.name; Sfx.kill();
   }
-  if (!World.authority) return;   // a client hears the result from the host
-  if (G.state !== 'dead' && G.alive <= 1 && G.player.alive) {
-    G.state = 'win'; G.placement = 1; Sfx.win();
-    if (G.player.anim) G.player.anim.play('Cheer', 0.2, true);
-    if (document.pointerLockElement) document.exitPointerLock();
+  if (!World.authority) return;
+
+  if (rumble) {
+    if (G.teamScores[0] >= GAME_MODES.rumble.scoreLimit || G.teamScores[1] >= GAME_MODES.rumble.scoreLimit) {
+      G.matchEnded = true;
+      const winningTeam = G.teamScores[0] >= GAME_MODES.rumble.scoreLimit ? 1 : 2;
+      const winner = G.ents.find(x => x.team === winningTeam) || null;
+      if (Net.hosting) Net.end(winner);
+      else if (G.player.team === winningTeam) { G.state = 'win'; G.placement = 1; Sfx.win(); }
+    }
+    return;
   }
-  if (Net.hosting && G.alive <= 1) Net.end(G.ents.find(x => x.alive) || null);
+
+  const teams = G.mode === 'duos' ? livingTeams() : [];
+  const finished = G.mode === 'duos' ? teams.length <= 1 : G.alive <= 1;
+  if (finished) {
+    const winningTeam = G.mode === 'duos' ? teams[0] : null;
+    const winner = G.ents.find(x => x.alive && (winningTeam === undefined || x.team === winningTeam)) || G.ents.find(x => x.alive) || null;
+    if (G.player.alive && (!winningTeam || G.player.team === winningTeam)) {
+      G.state = 'win'; G.placement = 1; Sfx.win();
+      if (G.player.anim) G.player.anim.play('Cheer', 0.2, true);
+      if (document.pointerLockElement) document.exitPointerLock();
+    }
+    if (Net.hosting) Net.end(winner);
+  }
 }
 
 function pushDamage(x, y, z, val, crit, shield) {
@@ -1446,6 +1505,7 @@ function botThink(b) {
   let best = null, bd = 92 * 92;
   for (const e of G.ents) {
     if (e === b || !e.alive || sameTeam(b, e) || e.pos[1] > TERRAIN_MAX + 40) continue;
+    if (sameTeam(b, e)) continue;
     const d = dist2(b.pos[0], b.pos[2], e.pos[0], e.pos[2]);
     if (d < bd && losClear(b.pos[0], entEye(b), b.pos[2], e.pos[0], entEye(e), e.pos[2])) { bd = d; best = e; }
   }
@@ -2654,7 +2714,7 @@ function drawTopRight(W, H) {
 
   hud.textAlign = 'right';
   hud.font = '800 20px system-ui, sans-serif'; hud.fillStyle = '#fff';
-  hud.fillText(G.alive + ' ALIVE', W - 30, cy + R2 + 22);
+  hud.fillText(G.mode === 'rumble' ? ('BLUE  ' + G.teamScores[0] + '  —  ' + G.teamScores[1] + '  RED') : (G.alive + ' ALIVE'), W - 30, cy + R2 + 22);
   hud.font = '700 13px system-ui, sans-serif';
   hud.fillStyle = s.shrinking ? '#c98bff' : 'rgba(255,255,255,.75)';
   hud.fillText(stormLabel(s), W - 30, cy + R2 + 44);
@@ -2844,6 +2904,7 @@ function update(dt) {
     if (G.state !== 'drop') updateStorm(dt);
     else { G.storm.timer -= dt * 0.4; if (G.storm.timer < 1) G.storm.timer = 1; }
     if (G.bus) { G.bus.t += dt; G.bus.x += G.bus.dx * 30 * dt; G.bus.z += G.bus.dz * 30 * dt; }
+    tickRespawns(dt);
     for (const e of G.ents) { if (!e.alive) e.deadT += dt; updateAnim(e, dt); }
   }
   if (G.state === 'drop' && G.ents.every(e => !e.alive || e.landed || e === p)) {
