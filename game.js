@@ -42,6 +42,10 @@ const GAME_MODES = {
   rumble: { name: 'Team Rumble', teams: true, building: true, storm: false, respawn: true, scoreLimit: 20 },
 };
 function sameTeam(a, b) { return !!(a && b && a !== b && GAME_MODES[G.mode]?.teams && a.team && a.team === b.team); }
+function teamColor(team) {
+  if (G.mode === 'rumble') return team === 1 ? [0.22, 0.52, 0.98] : [0.94, 0.27, 0.22];
+  return HUMAN_COLORS[(Math.max(1, team) - 1) % HUMAN_COLORS.length];
+}
 function livingTeams() { return Array.from(new Set(G.ents.filter(e => e.alive).map(e => e.team))); }
 
 const G = {
@@ -142,6 +146,7 @@ function newMatch(setup) {
       e.id = h.id;
       e.remote = h.id !== setup.myId;
       e.team = G.mode === 'rumble' ? 1 : G.mode === 'duos' ? Math.floor(i / 2) + 1 : i + 1;
+      if (GAME_MODES[G.mode].teams) e.color = teamColor(e.team);
       e.mats = [50, 0, 0];
       e.ammo = { light: 60, medium: 40, shells: 12 };
       G.ents.push(e);
@@ -154,6 +159,7 @@ function newMatch(setup) {
       const b = makeEntity(true, n, [rnd(0.35, 0.95), rnd(0.3, 0.9), rnd(0.35, 0.95)], pick(CHAR_SKINS));
       b.id = 1000 + i;          // far above any lobby id the relay could ever hand out
       b.team = G.mode === 'rumble' ? (i < 12 ? 1 : 2) : G.mode === 'duos' ? Math.floor(i / 2) + 1 : b.id;
+      if (GAME_MODES[G.mode].teams) b.color = teamColor(b.team);
       b.remote = !World.authority;
       b.skill = rnd(0.34, 0.92);
       b.role = pick(['aggressive', 'tactical', 'marksman', 'survivor']);
