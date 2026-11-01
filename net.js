@@ -26,6 +26,7 @@ const Net = {
   ws: null,
   id: 0, code: '', hostId: 0, players: [], mode: 'solo',
   active: false,              // in a lobby
+  launchPending: false,
   inMatch: false,             // playing a lobby match (as host or client)
   endTitle: '',               // end-screen headline once the host ends the match
   pendingTake: new Map(),     // loot id -> { swap, t } while the host decides
@@ -77,7 +78,7 @@ const Net = {
     this.resetLobby();
   },
   resetLobby() {
-    this.active = false; this.inMatch = false; this.endTitle = ''; this.mode = 'solo';
+    this.active = false; this.inMatch = false; this.endTitle = ''; this.mode = 'solo'; this.launchPending = false;
     this.id = 0; this.code = ''; this.hostId = 0; this.players = [];
     this.pendingTake.clear();
     if (this.ui) this.ui.show('join');
@@ -96,6 +97,7 @@ const Net = {
         if (this.ui) { this.ui.show('room'); this.ui.render(); }
         break;
       case 'start':
+        this.launchPending = false;
         if (this.active && !this.inMatch) this.applyStart(m);
         break;
       case 'players': {
@@ -114,7 +116,7 @@ const Net = {
         if (this.inMatch) { this.onEnd(null, 'HOST LEFT'); this.inMatch = false; this.pendingTake.clear(); }
         if (this.ui) this.ui.render();
         break;
-      case 'err': if (this.ui) { this.ui.err(m.msg); this.ui.render(); } break;
+      case 'err': this.launchPending = false; if (this.ui) { this.ui.err(m.msg); this.ui.render(); } break;
       case 'from': this.onGame(m.id, m.d); break;
     }
   },
@@ -144,8 +146,9 @@ const Net = {
       humans: this.players.map(p => ({ id: p.id, name: p.name, skin: p.skin })),
       bots: this.ui ? this.ui.bots() : true,
     };
+    this.launchPending = true;
+    if (this.ui) this.ui.render();
     this.raw({ t: 'launch', game: d });
-    this.applyStart(d);
   },
   applyStart(d) {
     this.inMatch = true; this.endTitle = ''; this.pendingTake.clear();
@@ -516,7 +519,7 @@ function lobbyUI(net) {
       $('readyBtn').textContent = mine && mine.ready ? 'CANCEL READY' : 'READY UP';
       $('readyBtn').classList.toggle('ghost', !!(mine && mine.ready));
       $('startBtn').style.display = host ? '' : 'none';
-      $('startBtn').disabled = !host || ready !== net.players.length || net.inMatch;
+      $('startBtn').disabled = !host || ready !== net.players.length || net.inMatch || net.launchPending;
       $('botsRow').style.display = host ? '' : 'none';
       $('waitMsg').textContent = host
         ? (ready === net.players.length ? 'Your squad is ready. Start when you are set.' : 'Waiting for every player to ready up…')
