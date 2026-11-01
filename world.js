@@ -76,7 +76,8 @@ function rollWeapon(minRar) {
   const r = Math.random();
   let rar = r < 0.36 ? 0 : r < 0.66 ? 1 : r < 0.86 ? 2 : r < 0.96 ? 3 : 4;
   if (minRar) rar = Math.max(rar, minRar);
-  const id = pick(GUN_IDS);
+  const pool = G.mode === 'sniper' ? ['sniper', 'dmr', 'revolver'] : GUN_IDS;
+  const id = pick(pool);
   const w = WEAPONS[id];
   return { id, rar, mag: w.mag, cooldown: 0, reloading: 0 };
 }
