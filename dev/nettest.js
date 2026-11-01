@@ -59,6 +59,23 @@ function client() {
 
     c.send({ t: 'join', code: ja.code, name: 'Cara' });
     await c.next(); await c.next(); await a.next(); await b.next();   // joined, then everyone's players update
+
+    a.send({ t: 'mode', mode: 'duos' });
+    const [ma, mbMode, mcMode] = await Promise.all([a.next(), b.next(), c.next()]);
+    ok(ma.mode === 'duos' && mbMode.mode === 'duos' && mcMode.mode === 'duos', 'mode: host selection is shared with the whole party');
+    ok(ma.players[0].ready && !ma.players[1].ready && !ma.players[2].ready, 'mode: changing mode readies the host and resets the party');
+    a.send({ t: 'launch', game: { seed: 42, humans: [{ id: 1 }, { id: 2 }, { id: 3 }] } });
+    const refused = await a.next();
+    ok(refused.t === 'err' && /ready/.test(refused.msg), 'launch: the server refuses to start while players are not ready');
+
+    b.send({ t: 'ready', ready: true });
+    c.send({ t: 'ready', ready: true });
+    const partyUpdates = await Promise.all([a.next(), a.next(), b.next(), b.next(), c.next(), c.next()]);
+    const finalRoster = partyUpdates.filter(m => m.t === 'players').slice(-1)[0];
+    ok(partyUpdates.length === 6 && finalRoster.players.every(p => p.ready), 'ready: the server broadcasts the updated ready state to everyone');
+    a.send({ t: 'launch', game: { seed: 42, humans: [{ id: 1 }, { id: 2 }, { id: 3 }], bots: true } });
+    const [startB, startC] = await Promise.all([b.next(), c.next()]);
+    ok(startB.t === 'start' && startC.t === 'start' && startB.mode === 'duos', 'launch: the selected game mode starts on every client');
     a.send({ t: 'to', to: 'all', d: { t: 'start', seed: 7 } });
     const [mb, mc] = await Promise.all([b.next(), c.next()]);
     ok(mb.d.seed === 7 && mc.d.seed === 7 && a.inbox.length === 0, "relay: 'all' reaches everyone except the sender");
