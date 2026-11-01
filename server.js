@@ -304,6 +304,7 @@ function handle(c, m) {
       if (Array.from(room.clients.values()).some(player => !player.ready)) { send(c, { t: 'err', msg: 'Wait until every player is ready' }); return; }
       room.locked = true;
       const start = Object.assign({}, game, { t: 'start', mode: room.mode });
+      send(c, start);                 // the host starts only after the server accepts the lobby state
       broadcast(room, start, c);
       break;
     }
