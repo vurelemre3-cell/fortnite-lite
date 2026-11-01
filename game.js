@@ -34,6 +34,15 @@ const HEAD_MUL = 1.6;      // headshot multiplier
 const BOT_SHIELD = 60;     // bots spawn with up to this much shield, so they take work to drop
 
 const WALK_SPEED = 7.2;    // sprint (L3 / Shift) is exactly double this
+const GAME_MODES = {
+  solo:   { name: 'Solo Battle Royale', teams: false, building: true, storm: true },
+  duos:   { name: 'Duos Battle Royale', teams: true, building: true, storm: true },
+  zero:   { name: 'Zero Build', teams: false, building: false, storm: true },
+  sniper: { name: 'Sniper Showdown', teams: false, building: true, storm: true },
+  rumble: { name: 'Team Rumble', teams: true, building: true, storm: false, respawn: true, scoreLimit: 20 },
+};
+function sameTeam(a, b) { return !!(a && b && a !== b && GAME_MODES[G.mode]?.teams && a.team && a.team === b.team); }
+function livingTeams() { return Array.from(new Set(G.ents.filter(e => e.alive).map(e => e.team))); }
 
 const G = {
   state: 'menu',            // menu | drop | play | dead | win
@@ -43,7 +52,7 @@ const G = {
   tracers: [], dmgNums: [], feed: [], parts: [],
   hitMark: 0, critMark: 0, elimFlash: 0, elimName: '', hurtFlash: 0,
   hurtDirs: [],             // where recent hits came from, for the damage direction arcs
-  alive: 0, placement: 0,
+  alive: 0, placement: 0, mode: 'solo', teamScores: [0, 0], matchEnded: false,
   msg: '', msgT: 0,
   firstPerson: false,
   paused: false,
@@ -67,7 +76,7 @@ const _av = [0, 0, 0], _bv = [0, 0, 0], _cv = [0, 0, 0], _camv = [0, 0, 0];
 function makeEntity(isBot, name, color, skin) {
   return {
     isBot, name, color, skin,
-    id: 0, human: !isBot, remote: false,   // remote = driven by the network, not simulated here
+    id: 0, human: !isBot, remote: false, team: 0, respawnT: 0,   // remote = driven by the network, not simulated here
     pos: [0, 0, 0], vel: [0, 0, 0],
     yaw: 0, pitch: 0,
     hp: 100, shield: 0, alive: true, deadT: 0,
@@ -103,12 +112,14 @@ function curWeapon(e) { const it = curItem(e); return it ? WEAPONS[it.id] : null
 // random about the world and the roster runs under the seed, so every client in
 // a lobby builds the identical map, bot list and drop line from the same setup.
 function soloSetup() {
-  return { seed: (Math.random() * 4294967296) >>> 0, humans: [{ id: 1, name: 'You', skin: 'char_knight' }], bots: true, myId: 1, authority: true };
+  return { seed: (Math.random() * 4294967296) >>> 0, mode: 'solo', humans: [{ id: 1, name: 'You', skin: 'char_knight' }], bots: true, myId: 1, authority: true };
 }
 
 function newMatch(setup) {
   if (!setup) setup = soloSetup();
   World.authority = setup.authority !== false;
+  G.mode = GAME_MODES[setup.mode] ? setup.mode : 'solo';
+  G.teamScores = [0, 0]; G.matchEnded = false;
   World.ents = G.ents;
   G.ents.length = 0; G.tracers.length = 0; G.dmgNums.length = 0; G.feed.length = 0; G.parts.length = 0;
   G.hurtDirs.length = 0; G.elimFlash = 0; G.hurtFlash = 0;
@@ -130,6 +141,7 @@ function newMatch(setup) {
       const e = makeEntity(false, h.name, HUMAN_COLORS[i % HUMAN_COLORS.length], h.skin || 'char_knight');
       e.id = h.id;
       e.remote = h.id !== setup.myId;
+      e.team = G.mode === 'rumble' ? 1 : G.mode === 'duos' ? Math.floor(i / 2) + 1 : i + 1;
       e.mats = [50, 0, 0];
       e.ammo = { light: 60, medium: 40, shells: 12 };
       G.ents.push(e);
@@ -141,6 +153,7 @@ function newMatch(setup) {
       const n = names.length ? names.splice((Math.random() * names.length) | 0, 1)[0] : 'Bot' + i;
       const b = makeEntity(true, n, [rnd(0.35, 0.95), rnd(0.3, 0.9), rnd(0.35, 0.95)], pick(CHAR_SKINS));
       b.id = 1000 + i;          // far above any lobby id the relay could ever hand out
+      b.team = G.mode === 'rumble' ? (i < 12 ? 1 : 2) : G.mode === 'duos' ? Math.floor(i / 2) + 1 : b.id;
       b.remote = !World.authority;
       b.skill = rnd(0.34, 0.92);
       b.role = pick(['aggressive', 'tactical', 'marksman', 'survivor']);
@@ -153,35 +166,62 @@ function newMatch(setup) {
       G.ents.push(b);
     }
 
-    // battle-bus line across the map: everyone has just jumped, spread along the
-    // bus's path; the bus itself is ahead of the last jumper and flies on
-    const busA = rnd(0, Math.PI * 2);
-    const bx = Math.cos(busA), bz = Math.sin(busA);
-    const sx = -bx * HALF * 0.85, sz = -bz * HALF * 0.85;
-    let hi = 0;
-    for (let i = 0; i < G.ents.length; i++) {
-      const e = G.ents[i];
-      const s = e.human ? HALF * 0.9 - (hi++) * 4 : rnd(HALF * 0.2, HALF * 1.5);
-      e.pos[0] = clamp(sx + bx * s + rnd(-6, 6), -HALF + 20, HALF - 20);
-      e.pos[2] = clamp(sz + bz * s + rnd(-6, 6), -HALF + 20, HALF - 20);
-      e.pos[1] = rnd(150, 172);
-      e.vel[0] = bx * 22; e.vel[2] = bz * 22; e.vel[1] = -2;
-      e.yaw = Math.atan2(-bx, -bz);
-      e.glide = false;
+    if (G.mode === 'rumble') {
+      // Team Rumble starts on opposite sides, with a full fighting loadout.
+      for (const e of G.ents) {
+        const blue = e.team === 1;
+        e.pos[0] = (blue ? -105 : 105) + rnd(-12, 12);
+        e.pos[2] = rnd(-34, 34);
+        e.pos[1] = terrainHeight(e.pos[0], e.pos[2]) + 0.05;
+        e.vel.fill(0); e.yaw = blue ? -Math.PI / 2 : Math.PI / 2;
+        e.grounded = true; e.landed = true; e.glide = false;
+        e.hp = 100; e.shield = 50; e.mats = [500, 500, 500];
+        e.ammo = { light: 120, medium: 180, shells: 48 };
+        e.inv[1] = { id: 'ar', rar: 1, mag: WEAPONS.ar.mag };
+        e.inv[2] = { id: 'shotgun', rar: 1, mag: WEAPONS.shotgun.mag };
+        e.slot = 1;
+      }
+      G.bus = null;
+    } else {
+      // Battle-bus line across the map: everyone has just jumped.
+      const busA = rnd(0, Math.PI * 2);
+      const bx = Math.cos(busA), bz = Math.sin(busA);
+      const sx = -bx * HALF * 0.85, sz = -bz * HALF * 0.85;
+      let hi = 0;
+      for (let i = 0; i < G.ents.length; i++) {
+        const e = G.ents[i];
+        const distance = e.human ? HALF * 0.9 - (hi++) * 4 : rnd(HALF * 0.2, HALF * 1.5);
+        e.pos[0] = clamp(sx + bx * distance + rnd(-6, 6), -HALF + 20, HALF - 20);
+        e.pos[2] = clamp(sz + bz * distance + rnd(-6, 6), -HALF + 20, HALF - 20);
+        e.pos[1] = rnd(150, 172);
+        e.vel[0] = bx * 22; e.vel[2] = bz * 22; e.vel[1] = -2;
+        e.yaw = Math.atan2(-bx, -bz);
+        e.glide = false;
+        if (G.mode === 'sniper') {
+          e.inv[1] = { id: 'dmr', rar: 2, mag: WEAPONS.dmr.mag };
+          e.inv[2] = { id: 'sniper', rar: 1, mag: WEAPONS.sniper.mag };
+          e.slot = 1; e.ammo.medium = 72;
+        }
+        if (G.mode === 'zero') { e.shield = 50; e.mats = [0, 0, 0]; }
+      }
+      G.bus = { x: sx + bx * HALF * 1.6, z: sz + bz * HALF * 1.6, y: 178, dx: bx, dz: bz, t: 0 };
     }
-    G.bus = { x: sx + bx * HALF * 1.6, z: sz + bz * HALF * 1.6, y: 178, dx: bx, dz: bz, t: 0 };
     newStorm();
   });
   // remote entities are placed by the network, so the drop never waits on them
   for (const e of G.ents) if (e.remote) e.landed = true;
   G.alive = G.ents.length;
-  G.state = 'drop';
-  say(Input.padActive ? 'DROP IN — hold the left stick forward to dive' : 'DROP IN — hold W to dive');
+  G.state = G.mode === 'rumble' ? 'play' : 'drop';
+  say(G.mode === 'rumble' ? 'TEAM RUMBLE — FIRST TO 20 ELIMINATIONS' : (Input.padActive ? 'DROP IN — hold the left stick forward to dive' : 'DROP IN — hold W to dive'));
 }
 
 function entById(id) { for (const e of G.ents) if (e.id === id) return e; return null; }
 
 function newStorm() {
+  if (G.mode === 'rumble') {
+    G.storm = { cx: 0, cz: 0, r: HALF * 2, tcx: 0, tcz: 0, tr: HALF * 2, phase: STORM_PHASES.length, timer: STORM_DONE_T, shrinking: false, dps: 0, r0: HALF * 2, tickT: 0 };
+    return;
+  }
   G.storm = {
     cx: rnd(-40, 40), cz: rnd(-40, 40), r: HALF * 1.45,
     tcx: 0, tcz: 0, tr: HALF * 1.45,
@@ -278,6 +318,7 @@ function rayEntities(ox, oy, oz, dx, dy, dz, maxT, ignore) {
 // Where a hit goes. Solo and the lobby host apply it; a client shows the hit
 // (marker, number, flinch) and reports it to the host, who owns everyone's health.
 function dealDamage(target, dmg, attacker, head) {
+  if (sameTeam(target, attacker)) return;
   if (World.authority) { applyDamage(target, dmg, attacker, head, false); return; }
   if (!target.alive) return;
   target.hurtT = 0.25;
@@ -307,7 +348,7 @@ function dealPropDamage(p, dmg) {
 }
 
 function applyDamage(target, dmg, attacker, head, byStorm) {
-  if (!target.alive) return;
+  if (!target.alive || sameTeam(target, attacker)) return;
   let d = dmg;
   const hadShield = target.shield > 0;
   if (target.shield > 0) { const s = Math.min(target.shield, d); target.shield -= s; d -= s; }
@@ -704,6 +745,7 @@ function buildPlan(e) {
 }
 
 function tryBuild(e) {
+  if (!GAME_MODES[G.mode].building) { if (e === G.player) say('BUILDING IS DISABLED IN ZERO BUILD'); return false; }
   const plan = buildPlan(e);
   if (e.mats[e.buildMat] < BUILD_COST) { if (e === G.player) say('NOT ENOUGH ' + MAT_NAME[e.buildMat].toUpperCase()); return false; }
   if (!canPlace(plan.type, plan.gx, plan.gy, plan.gz, plan.rot)) return false;
@@ -771,12 +813,18 @@ function updatePlayer(e, dt) {
     if (e.buildMode) e.buildType = (e.buildType + (Input.wheel > 0 ? 1 : 3)) % 4;
     else cycleSlot(e, Input.wheel);
   }
-  if (Input.hit('KeyQ')) e.buildMode = !e.buildMode;
+  if (Input.hit('KeyQ')) {
+    if (GAME_MODES[G.mode].building) e.buildMode = !e.buildMode;
+    else say('BUILDING IS DISABLED IN ZERO BUILD');
+  }
   // Keyboard Builder Pro: the piece key selects *and* places on the same press,
   // and holding it turbo-builds — same rule as the pad shoulders.
   const bindings = { KeyZ: 0, KeyX: 1, KeyC: 2, KeyV: 3 };
   for (const k in bindings) {
-    if (Input.hit(k)) { e.buildMode = true; e.buildType = bindings[k]; e.buildKey = k; }
+    if (Input.hit(k)) {
+      if (GAME_MODES[G.mode].building) { e.buildMode = true; e.buildType = bindings[k]; e.buildKey = k; }
+      else say('BUILDING IS DISABLED IN ZERO BUILD');
+    }
     if (e.buildKey === k && Input.down(k) && e.buildMode && e.buildT <= 0) tryBuild(e);
   }
   if (e.buildKey && !Input.down(e.buildKey)) e.buildKey = null;
@@ -1397,7 +1445,7 @@ function updateBot(b, dt) {
 function botThink(b) {
   let best = null, bd = 92 * 92;
   for (const e of G.ents) {
-    if (e === b || !e.alive || e.pos[1] > TERRAIN_MAX + 40) continue;
+    if (e === b || !e.alive || sameTeam(b, e) || e.pos[1] > TERRAIN_MAX + 40) continue;
     const d = dist2(b.pos[0], b.pos[2], e.pos[0], e.pos[2]);
     if (d < bd && losClear(b.pos[0], entEye(b), b.pos[2], e.pos[0], entEye(e), e.pos[2])) { bd = d; best = e; }
   }
