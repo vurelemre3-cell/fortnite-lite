@@ -24,7 +24,7 @@ const r3 = x => Math.round(x * 1000) / 1000;
 
 const Net = {
   ws: null,
-  id: 0, code: '', hostId: 0, players: [],
+  id: 0, code: '', hostId: 0, players: [], mode: 'solo',
   active: false,              // in a lobby
   inMatch: false,             // playing a lobby match (as host or client)
   endTitle: '',               // end-screen headline once the host ends the match
@@ -68,14 +68,16 @@ const Net = {
 
   /* -------------------------------- lobby --------------------------------- */
 
-  async create(name, skin) { await this.connect(); this.raw({ t: 'create', name, skin }); },
+  async create(name, skin, mode) { await this.connect(); this.raw({ t: 'create', name, skin, mode }); },
   async join(code, name, skin) { await this.connect(); this.raw({ t: 'join', code, name, skin }); },
+  setMode(mode) { if (this.active && this.id === this.hostId) this.raw({ t: 'mode', mode }); },
+  setReady(ready) { if (this.active) this.raw({ t: 'ready', ready: !!ready }); },
   leave() {
     if (this.active) this.raw({ t: 'leave' });
     this.resetLobby();
   },
   resetLobby() {
-    this.active = false; this.inMatch = false; this.endTitle = '';
+    this.active = false; this.inMatch = false; this.endTitle = ''; this.mode = 'solo';
     this.id = 0; this.code = ''; this.hostId = 0; this.players = [];
     this.pendingTake.clear();
     if (this.ui) this.ui.show('join');
@@ -90,12 +92,15 @@ const Net = {
   onMessage(m) {
     switch (m.t) {
       case 'joined':
-        this.active = true; this.id = m.id; this.code = m.code; this.hostId = m.hostId; this.players = m.players;
+        this.active = true; this.id = m.id; this.code = m.code; this.hostId = m.hostId; this.players = m.players; this.mode = m.mode || 'solo';
         if (this.ui) { this.ui.show('room'); this.ui.render(); }
+        break;
+      case 'start':
+        if (this.active && !this.inMatch) this.applyStart(m);
         break;
       case 'players': {
         const before = this.players;
-        this.hostId = m.hostId; this.players = m.players;
+        this.hostId = m.hostId; this.players = m.players; this.mode = m.mode || this.mode;
         if (this.ui) this.ui.render();
         if (this.hosting) this.playersLeft(before);
         break;
@@ -128,29 +133,33 @@ const Net = {
   // Host: describe the match and start it everywhere at once.
   startMatch() {
     if (!this.active || this.id !== this.hostId) return;
+    if (this.players.some(p => !p.ready)) { if (this.ui) this.ui.err('Every player must be ready before the match can start'); return; }
     const d = {
       t: 'start',
       seed: (Math.random() * 4294967296) >>> 0,
+      mode: this.mode || 'solo',
       humans: this.players.map(p => ({ id: p.id, name: p.name, skin: p.skin })),
       bots: this.ui ? this.ui.bots() : true,
     };
-    this.raw({ t: 'lock', on: true });
-    this.bcast(d);
+    this.raw({ t: 'launch', game: d });
     this.applyStart(d);
   },
   applyStart(d) {
     this.inMatch = true; this.endTitle = ''; this.pendingTake.clear();
     this.stT = 0; this.snapT = 0;
-    startGame({ seed: d.seed, humans: d.humans, bots: !!d.bots, myId: this.id, authority: this.id === this.hostId });
+    this.mode = d.mode || this.mode || 'solo';
+    startGame({ seed: d.seed, mode: this.mode, humans: d.humans, bots: !!d.bots, myId: this.id, authority: this.id === this.hostId });
   },
 
   // The match is over for me: the winner is named, or the host went away.
   onEnd(winnerId, title) {
     const w = winnerId ? entById(winnerId) : null;
-    if (w && w === G.player && G.player.alive) {
+    const wonByTeam = !!(w && G.player && w.team && w.team === G.player.team
+      && (G.mode === 'duos' || G.mode === 'rumble'));
+    if (w && (w === G.player || wonByTeam)) {
       if (G.state !== 'win') {
         G.state = 'win'; G.placement = 1; Sfx.win();
-        if (G.player.anim) G.player.anim.play('Cheer', 0.2, true);
+        if (G.player.alive && G.player.anim) G.player.anim.play('Cheer', 0.2, true);
         if (document.pointerLockElement) document.exitPointerLock();
       }
       return;
@@ -270,6 +279,7 @@ const Net = {
         if (fromHost) { const ch = World.chests[d.i]; if (ch && !ch.opened) { ch.opened = true; ch.openT = 0; chestBurst(ch, null); if (dist2(G.player.pos[0], G.player.pos[2], ch.x, ch.z) < 45 * 45) Sfx.chest(); } }
         break;
       case 'elim': if (fromHost) { const t = entById(d.e); if (t) eliminate(t, d.by ? entById(d.by) : null, !!d.s, d.pl); } break;
+      case 'respawn': if (fromHost) { const t = entById(d.i); if (t) respawnEntity(t, d); } break;
       case 'end': if (fromHost) this.onEnd(d.w); break;
     }
   },
@@ -300,7 +310,7 @@ const Net = {
   sendSnap() {
     const s = G.storm;
     const d = {
-      t: 'snap', al: G.alive,
+      t: 'snap', al: G.alive, ts: G.teamScores,
       sm: { cx: r2(s.cx), cz: r2(s.cz), r: r2(s.r), tcx: r2(s.tcx), tcz: r2(s.tcz), tr: r2(s.tr), ph: s.phase, tm: r2(s.timer),
         sk: s.shrinking ? 1 : 0, dps: s.dps, fr: r2(s.fromR), fx: r2(s.fromX), fz: r2(s.fromZ), sd: s.shrinkDur },
       es: [],
@@ -330,6 +340,7 @@ const Net = {
   applySnap(d) {
     if (!this.client) return;
     G.alive = d.al;
+    if (d.ts) G.teamScores = d.ts.slice(0, 2);
     const s = G.storm, ss = d.sm;
     if (ss.sk && !s.shrinking) { say('THE STORM IS CLOSING'); Sfx.warn(); }
     s.cx = ss.cx; s.cz = ss.cz; s.r = ss.r; s.tcx = ss.tcx; s.tcz = ss.tcz; s.tr = ss.tr;
@@ -423,6 +434,7 @@ const Net = {
   lootGone(l, by) { this.bcast({ t: 'lgone', i: l.id, by }); },
   chestOpened(i) { this.bcast({ t: 'chestOpen', i }); },
   elim(e, attacker, byStorm, placement) { this.bcast({ t: 'elim', e: e.id, by: attacker ? attacker.id : null, s: byStorm ? 1 : 0, pl: placement }); },
+  respawn(e, data) { this.bcast(Object.assign({ t: 'respawn', i: e.id }, data)); },
   end(w) { this.bcast({ t: 'end', w: w ? w.id : null }); this.onEnd(w ? w.id : null); },
 
   /* --------------------------------- UI ----------------------------------- */
@@ -440,8 +452,17 @@ const Net = {
 function lobbyUI(net) {
   const $ = id => document.getElementById(id);
   const nameIn = $('nameIn'), skinSel = $('skinSel'), codeIn = $('codeIn'), err = $('lobbyErr');
+  const modeJoinSel = $('modeJoinSel'), modeRoomSel = $('modeRoomSel');
   const joinBox = $('lobbyJoin'), roomBox = $('lobbyRoom');
   const SKIN_NAMES = { char_knight: 'Knight', char_barbarian: 'Barbarian', char_mage: 'Mage', char_rogue: 'Rogue', char_rogue_hooded: 'Hooded Rogue' };
+  const MODES = {
+    solo: { name: 'SOLO BATTLE ROYALE', desc: 'Classic 24-player battle royale. Loot, build, survive the storm and be the last player standing.' },
+    duos: { name: 'DUOS BATTLE ROYALE', desc: 'Fight in pairs. Your teammate is friendly, bots form their own duos and the last squad alive wins.' },
+    zero: { name: 'ZERO BUILD', desc: 'Battle royale without building or harvesting. Everyone starts with extra shield to keep fights moving.' },
+    sniper: { name: 'SNIPER SHOWDOWN', desc: 'Long-range precision fights. Loot is focused on sniper rifles, DMRs and revolvers.' },
+    rumble: { name: 'TEAM RUMBLE', desc: 'Two teams fight in a large battle. Respawn after eliminations and race to 20 team eliminations.' },
+  };
+  const describe = (id, target) => { if (target) target.textContent = (MODES[id] || MODES.solo).desc; };
   for (const k of CHAR_SKINS) { const o = document.createElement('option'); o.value = k; o.textContent = SKIN_NAMES[k] || k; skinSel.appendChild(o); }
   try {
     nameIn.value = localStorage.getItem('fl_name') || '';
@@ -458,23 +479,46 @@ function lobbyUI(net) {
     },
     err(msg) { err.textContent = msg; },
     bots() { return $('botsChk').checked; },
+    mode() { return modeJoinSel.value || 'solo'; },
     render() {
       $('roomCode').textContent = net.code;
-      // a statically hosted page reached its relay through ?server= — the invite has to carry it too
       const srv = new URLSearchParams(location.search).get('server');
       const link = location.origin + location.pathname + '?join=' + net.code + (srv ? '&server=' + encodeURIComponent(srv) : '');
-      $('roomLink').textContent = link; $('roomLink').href = link;
+      $('roomLink').textContent = link;
+      $('roomLink').href = link;
+      const mode = MODES[net.mode] || MODES.solo;
+      $('roomModeName').textContent = mode.name;
+      describe(net.mode, $('roomModeDesc'));
+      if (modeRoomSel.value !== net.mode) modeRoomSel.value = net.mode;
+      const host = net.id === net.hostId;
+      modeRoomSel.disabled = !host || net.inMatch;
       const list = $('playerList');
       list.innerHTML = '';
+      let ready = 0;
       for (const p of net.players) {
+        if (p.ready) ready++;
         const row = document.createElement('div');
-        row.textContent = p.name + (p.id === net.hostId ? '  ·  host' : '') + (p.id === net.id ? '  (you)' : '');
+        row.className = 'player-row';
+        const name = document.createElement('span');
+        name.className = 'player-name';
+        name.textContent = p.name + (p.id === net.hostId ? ' · HOST' : '') + (p.id === net.id ? ' · YOU' : '');
+        const state = document.createElement('span');
+        state.className = p.ready ? 'ready' : 'not-ready';
+        state.textContent = p.ready ? 'READY' : 'NOT READY';
+        row.append(name, state);
         list.appendChild(row);
       }
-      const host = net.id === net.hostId;
+      $('readyCount').textContent = ready + ' / ' + net.players.length + ' READY';
+      const mine = net.players.find(p => p.id === net.id);
+      $('readyBtn').textContent = mine && mine.ready ? 'CANCEL READY' : 'READY UP';
+      $('readyBtn').classList.toggle('ghost', !!(mine && mine.ready));
       $('startBtn').style.display = host ? '' : 'none';
+      $('startBtn').disabled = !host || ready !== net.players.length || net.inMatch;
       $('botsRow').style.display = host ? '' : 'none';
-      $('waitMsg').style.display = host ? 'none' : '';
+      $('waitMsg').textContent = host
+        ? (ready === net.players.length ? 'Your squad is ready. Start when you are set.' : 'Waiting for every player to ready up…')
+        : (mine && mine.ready ? 'Ready. Waiting for the host to start…' : 'Choose READY UP when you are ready.');
+      $('roomStatus').textContent = ready === net.players.length ? 'SQUAD READY' : 'WAITING FOR SQUAD';
     },
   };
   const name = () => {
@@ -483,7 +527,9 @@ function lobbyUI(net) {
     return n;
   };
   const guard = fn => async () => { err.textContent = ''; try { await fn(); } catch (e) { err.textContent = e.message || String(e); } };
-  $('createBtn').addEventListener('click', guard(() => net.create(name(), skinSel.value)));
+  modeJoinSel.addEventListener('change', () => describe(modeJoinSel.value, $('modeJoinDesc')));
+  modeRoomSel.addEventListener('change', () => net.setMode(modeRoomSel.value));
+  $('createBtn').addEventListener('click', guard(() => net.create(name(), skinSel.value, modeJoinSel.value)));
   $('joinBtn').addEventListener('click', guard(() => {
     const code = codeIn.value.trim().toUpperCase();
     if (code.length !== 4) throw new Error('Enter the 4-letter lobby code');
@@ -491,8 +537,13 @@ function lobbyUI(net) {
   }));
   codeIn.addEventListener('keydown', e => { if (e.key === 'Enter') $('joinBtn').click(); });
   nameIn.addEventListener('keydown', e => { if (e.key === 'Enter') $('createBtn').click(); });
+  $('readyBtn').addEventListener('click', () => {
+    const mine = net.players.find(p => p.id === net.id);
+    net.setReady(!(mine && mine.ready));
+  });
   $('startBtn').addEventListener('click', () => net.startMatch());
   $('leaveBtn').addEventListener('click', () => net.leave());
+  describe(modeJoinSel.value, $('modeJoinDesc'));
   ui.show('join');
   if (joinParam && codeIn.value.length === 4) setTimeout(() => nameIn.focus(), 0);
   return ui;
