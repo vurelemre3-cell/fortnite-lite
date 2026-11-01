@@ -857,7 +857,10 @@ function updatePlayer(e, dt) {
   // Stopping still isn't automatic — standing still while toggled on just walks
   // off at double speed again the moment you push a direction.
   if (Input.hit('ShiftLeft') || Input.hit('ShiftRight')) e.sprint = !e.sprint;
-  const speed = (e.sprint ? WALK_SPEED * 2 : WALK_SPEED) * (e.useT > 0 ? 0.4 : 1);
+  const activeItem = curItem(e), activeWeapon = activeItem && WEAPONS[activeItem.id];
+  e.ads = (Input.mouse[2] || Input.padDown(PAD.LT)) && !e.buildMode && !e.sprint && e.useT <= 0;
+  const aimSpeed = e.ads ? (activeWeapon && activeWeapon.scope ? 0.52 : 0.68) : 1;
+  const speed = (e.sprint ? WALK_SPEED * 2 : WALK_SPEED) * aimSpeed * (e.useT > 0 ? 0.4 : 1);
   const accel = e.grounded ? 60 : 14;
   e.vel[0] += (wishX * speed - e.vel[0]) * Math.min(1, accel * dt);
   e.vel[2] += (wishZ * speed - e.vel[2]) * Math.min(1, accel * dt);
@@ -904,7 +907,7 @@ function updatePlayer(e, dt) {
   // ---- action ----
   const padFireHeld = Input.padDown(PAD.RT) && !e.buildMode;
   const padFireHit = Input.padHit(PAD.RT) && !e.buildMode;
-  e.ads = (Input.mouse[2] || Input.padDown(PAD.LT)) && !e.buildMode;
+  // ADS was resolved before movement so aiming also changes movement speed.
   if (e.buildMode) {
     if (Input.mouse[0] && e.buildT <= 0) tryBuild(e);
     if (Input.hit('KeyR')) e.buildRot = (e.buildRot + 1) % 4;
