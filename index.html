@@ -45,6 +45,7 @@
   #roomLink { display:block; margin:7px 0 4px; }
   .room-mode-row { display:grid; grid-template-columns:1fr; gap:5px; text-align:left; width:100%; }
   .room-mode-row > span { color:#9db4ca; font-size:10px; font-weight:900; letter-spacing:.12em; }
+  .room-mode-row strong { color:#fff; font-size:13px; letter-spacing:.04em; }
   .roster-head { display:flex; justify-content:space-between; align-items:center; margin:12px 0 5px;
     color:#9db4ca; font-size:10px; font-weight:900; letter-spacing:.14em; text-transform:uppercase; }
   #playerList { display:grid; grid-template-columns:1fr 1fr; gap:5px; width:100%; min-width:0; }
@@ -192,6 +193,7 @@
       <a id="roomLink" target="_blank" rel="noopener">Copy invite link</a>
       <div class="room-mode-row">
         <span>GAME MODE · HOST SETTINGS</span>
+        <strong id="roomModeName">SOLO BATTLE ROYALE</strong>
         <select id="modeRoomSel">
           <option value="solo">SOLO BATTLE ROYALE</option>
           <option value="duos">DUOS BATTLE ROYALE</option>
