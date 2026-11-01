@@ -74,8 +74,8 @@ function client() {
     const finalRoster = partyUpdates.filter(m => m.t === 'players').slice(-1)[0];
     ok(partyUpdates.length === 6 && finalRoster.players.every(p => p.ready), 'ready: the server broadcasts the updated ready state to everyone');
     a.send({ t: 'launch', game: { seed: 42, humans: [{ id: 1 }, { id: 2 }, { id: 3 }], bots: true } });
-    const [startB, startC] = await Promise.all([b.next(), c.next()]);
-    ok(startB.t === 'start' && startC.t === 'start' && startB.mode === 'duos', 'launch: the selected game mode starts on every client');
+    const [startA, startB, startC] = await Promise.all([a.next(), b.next(), c.next()]);
+    ok(startA.t === 'start' && startB.t === 'start' && startC.t === 'start' && startA.mode === 'duos', 'launch: the server confirms the selected game mode to the whole party');
     a.send({ t: 'to', to: 'all', d: { t: 'start', seed: 7 } });
     const [mb, mc] = await Promise.all([b.next(), c.next()]);
     ok(mb.d.seed === 7 && mc.d.seed === 7 && a.inbox.length === 0, "relay: 'all' reaches everyone except the sender");
