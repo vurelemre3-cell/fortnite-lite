@@ -377,5 +377,63 @@ console.log('16. bots choose a weapon for the current engagement distance');
   const upgrade = { id: 'dmr', rar: 4, mag: 12 };
   ok(botUpgradeSlot(bot, upgrade, 100) === 3, 'a bot can replace an empty weapon with a loaded upgrade');
 }
+console.log('17. all five game modes have explicit, distinct rules');
+{
+  ok(Object.keys(GAME_MODES).length === 5, 'five game modes are registered');
+  ok(GAME_MODES.zero.building === false, 'Zero Build disables construction');
+  ok(GAME_MODES.rumble.respawn === true && GAME_MODES.rumble.scoreLimit === 20, 'Team Rumble has respawns and a score limit');
+  ok(GAME_MODES.duos.teams === true && GAME_MODES.duos.teamSize === undefined, 'Duos uses team-based victory rules');
+}
+console.log('18. Zero Build blocks construction without consuming materials');
+{
+  flatWorld();
+  G.mode = 'zero';
+  const p = spawn(0, 0);
+  p.mats = [500, 500, 500];
+  const before = p.mats.reduce((a, b) => a + b, 0);
+  ok(tryBuild(p) === false, 'construction is refused in Zero Build');
+  ok(p.mats.reduce((a, b) => a + b, 0) === before, 'refused construction does not consume materials');
+}
+console.log('19. Sniper Showdown only creates precision weapons');
+{
+  G.mode = 'sniper';
+  const allowed = new Set(['sniper', 'dmr', 'revolver']);
+  const drops = Array.from({ length: 120 }, () => rollWeapon().id);
+  ok(drops.length === 120 && drops.every(id => allowed.has(id)), '120 random weapon drops are all sniper, DMR or revolver');
+  G.mode = 'solo';
+}
+console.log('20. teammates cannot damage each other in Duos or Team Rumble');
+{
+  flatWorld();
+  G.mode = 'duos';
+  const a = spawn(0, 0); a.team = 1;
+  const teammate = makeEntity(true, 'Mate', [0, 1, 0], 'char_knight');
+  teammate.team = 1; teammate.hp = 100; teammate.shield = 0;
+  G.ents.push(teammate);
+  ok(sameTeam(a, teammate), 'two members of a Duos team are recognised as teammates');
+  applyDamage(teammate, 50, a, false, false);
+  ok(teammate.hp === 100, 'a teammate cannot damage another teammate');
+  G.mode = 'rumble';
+  ok(sameTeam(a, teammate), 'the same team-protection rule applies in Team Rumble');
+}
+console.log('21. Team Rumble awards points and restores a player on respawn');
+{
+  flatWorld();
+  G.mode = 'rumble'; G.teamScores = [0, 0]; G.matchEnded = false; G.state = 'play';
+  World.authority = true;
+  const player = spawn(0, 0); player.team = 1; player.id = 1;
+  const attacker = makeEntity(true, 'Blue Bot', [0, 0, 1], 'char_knight');
+  attacker.id = 2; attacker.team = 1;
+  const victim = makeEntity(true, 'Red Bot', [1, 0, 0], 'char_knight');
+  victim.id = 3; victim.team = 2;
+  G.ents.push(attacker, victim); G.alive = 3;
+  eliminate(victim, attacker, false);
+  ok(G.teamScores[0] === 1 && G.teamScores[1] === 0, 'a Blue elimination adds one point to Blue');
+  ok(!victim.alive && victim.respawnT > 0, 'eliminated players enter the respawn countdown');
+  respawnEntity(victim, { x: 10, y: 0.05, z: 10, yaw: Math.PI });
+  ok(victim.alive && victim.hp === 100 && victim.shield === 50, 'respawn restores health and shield');
+  ok(G.alive === 3 && victim.team === 2, 'respawn restores the alive count and keeps the original team');
+  G.mode = 'solo';
+}
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
