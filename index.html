@@ -16,6 +16,55 @@
     align-items:center; justify-content:center; gap:18px; text-align:center;
     background:linear-gradient(180deg, rgba(6,10,22,.45), rgba(6,10,22,.78));
     backdrop-filter: blur(5px); z-index:10; }
+  #menu { justify-content:flex-start; overflow-y:auto; overscroll-behavior:contain; padding:30px 18px 34px; }
+  #menu h1 { margin-top:14px; }
+  #lobby { width:min(650px,94vw); }
+  #lobbyJoin, #lobbyRoom { width:100%; }
+  .lobby-head { display:flex; align-items:center; justify-content:space-between; gap:12px; width:100%; }
+  .lobby-kicker { color:#8ddcff; font-size:10px; letter-spacing:.2em; font-weight:900; }
+  .lobby-section { margin:12px 0 6px; text-align:left; color:#9db4ca; font-size:10px; font-weight:900; letter-spacing:.15em; }
+  .lobby-grid { display:grid; grid-template-columns:1fr 1fr; gap:9px; width:100%; }
+  .lobby-field { display:flex; flex-direction:column; gap:5px; text-align:left; min-width:0; }
+  .lobby-field.full { grid-column:1/-1; }
+  .lobby-field > span { color:#9db4ca; font-size:10px; font-weight:900; letter-spacing:.12em; text-transform:uppercase; }
+  #lobby input, #lobby select { width:100%; min-width:0; font:700 14px system-ui,sans-serif; padding:10px 12px;
+    border-radius:6px; border:1px solid rgba(255,255,255,.16); background:rgba(0,0,0,.36); color:#fff; outline:none; }
+  #lobby input:focus, #lobby select:focus { border-color:var(--blue); }
+  #lobby select option { color:#000; }
+  #lobby button.small { font-size:12px; padding:11px 16px; letter-spacing:.08em; box-shadow:0 4px 0 #14618c; }
+  #lobby button.ghost { background:rgba(255,255,255,.10); color:#cfe6ff; box-shadow:none; }
+  #lobby button:disabled { opacity:.42; cursor:not-allowed; transform:none; box-shadow:none; }
+  #lobby .err { color:#ff8a8a; font-size:12px; min-height:16px; }
+  .mode-desc { min-height:34px; margin:7px 0 4px; color:#a9c0d6; text-align:left; font-size:11px; line-height:1.45; }
+  .lobby-actions { display:flex; gap:8px; align-items:center; justify-content:space-between; flex-wrap:wrap; }
+  .lobby-actions button { flex:1 1 140px; }
+  .room-banner { display:flex; justify-content:space-between; align-items:center; gap:10px; width:100%; text-align:left; }
+  .room-code { display:flex; flex-direction:column; gap:2px; color:#9db4ca; font-size:9px; letter-spacing:.18em; font-weight:900; }
+  .room-code b { color:var(--gold); font-size:27px; letter-spacing:.25em; }
+  .room-status { border:1px solid rgba(127,216,255,.25); color:#aee8ff; border-radius:4px; padding:7px 9px; font-size:10px; font-weight:900; letter-spacing:.09em; }
+  #roomLink { display:block; margin:7px 0 4px; }
+  .room-mode-row { display:grid; grid-template-columns:1fr; gap:5px; text-align:left; width:100%; }
+  .room-mode-row > span { color:#9db4ca; font-size:10px; font-weight:900; letter-spacing:.12em; }
+  .roster-head { display:flex; justify-content:space-between; align-items:center; margin:12px 0 5px;
+    color:#9db4ca; font-size:10px; font-weight:900; letter-spacing:.14em; text-transform:uppercase; }
+  #playerList { display:grid; grid-template-columns:1fr 1fr; gap:5px; width:100%; min-width:0; }
+  #playerList .player-row { display:flex; justify-content:space-between; align-items:center; gap:8px; min-width:0;
+    padding:8px 9px; border:1px solid rgba(255,255,255,.08); background:rgba(0,0,0,.24); border-radius:5px; text-align:left; }
+  #playerList .player-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px; }
+  #playerList .player-role { color:#9db4ca; font-size:9px; white-space:nowrap; }
+  #playerList .ready { color:#73e7a2; font-size:9px; font-weight:900; letter-spacing:.08em; }
+  #playerList .not-ready { color:#ffd36b; font-size:9px; font-weight:900; letter-spacing:.08em; }
+  #botsRow { margin-top:9px; font-size:11px; }
+  #botsRow input { width:auto; accent-color:#54c7ff; }
+  .lobby-footer { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; margin-top:10px; }
+  .lobby-footer .lobby-actions { flex:1; }
+  #waitMsg { width:100%; text-align:left; color:#a9c0d6; font-size:10px; min-height:14px; }
+  @media(max-width:560px) {
+    #menu { padding:20px 10px 28px; gap:13px; }
+    .lobby-grid { grid-template-columns:1fr 1fr; }
+    #playerList { grid-template-columns:1fr; }
+    .lobby-footer { align-items:stretch; }
+  }
   #endScreen { background:radial-gradient(circle at 50% 30%, rgba(40,80,160,.55), rgba(6,8,16,.94) 70%); }
   h1 { font-size:clamp(38px,7vw,86px); margin:0; letter-spacing:.06em; font-weight:900;
        background:linear-gradient(180deg,#fff,#7fd8ff); -webkit-background-clip:text;
@@ -123,30 +172,61 @@
     <p class="settings-foot">Your settings are saved automatically on this device.</p>
   </details>
   <div id="lobby">
-    <h3>Play with friends</h3>
+    <div class="lobby-head">
+      <h3>PLAY WITH FRIENDS</h3>
+      <span class="lobby-kicker">PARTY / MATCHMAKING</span>
+    </div>
     <div id="lobbyJoin">
-      <div class="row">
-        <input id="nameIn" maxlength="14" placeholder="Your name" autocomplete="off">
-        <select id="skinSel" title="Character"></select>
+      <div class="lobby-grid">
+        <label class="lobby-field"><span>Player name</span><input id="nameIn" maxlength="14" placeholder="Your name" autocomplete="off"></label>
+        <label class="lobby-field"><span>Character</span><select id="skinSel" title="Character"></select></label>
+        <label class="lobby-field full"><span>Choose game mode</span>
+          <select id="modeJoinSel">
+            <option value="solo">SOLO BATTLE ROYALE · 24 PLAYERS</option>
+            <option value="duos">DUOS BATTLE ROYALE · SQUADS OF 2</option>
+            <option value="zero">ZERO BUILD · NO BUILDING</option>
+            <option value="sniper">SNIPER SHOWDOWN · PRECISION WEAPONS</option>
+            <option value="rumble">TEAM RUMBLE · RESPAWNS + SCORE LIMIT</option>
+          </select>
+        </label>
       </div>
-      <div class="row" style="margin-top:8px">
-        <button id="createBtn" class="small">CREATE LOBBY</button>
-        <span style="opacity:.6;font-size:12px">or</span>
-        <input id="codeIn" maxlength="4" placeholder="CODE" autocomplete="off">
-        <button id="joinBtn" class="small">JOIN</button>
+      <p class="mode-desc" id="modeJoinDesc">Classic 24-player battle royale. Loot, build, survive the storm and be the last player standing.</p>
+      <div class="lobby-actions">
+        <button id="createBtn" class="small">CREATE PRIVATE LOBBY</button>
+        <input id="codeIn" maxlength="4" placeholder="CODE" autocomplete="off" aria-label="Lobby code" style="max-width:105px;text-transform:uppercase;letter-spacing:.2em;text-align:center">
+        <button id="joinBtn" class="small ghost">JOIN</button>
       </div>
       <div class="err" id="lobbyErr"></div>
     </div>
     <div id="lobbyRoom" style="display:none">
-      <div class="code">LOBBY <b id="roomCode"></b></div>
-      <a id="roomLink" target="_blank" rel="noopener"></a>
-      <div id="playerList" style="margin:10px auto"></div>
-      <label id="botsRow"><input type="checkbox" id="botsChk" checked> Fill the lobby with bots (24 total)</label>
-      <div class="row" style="margin-top:10px">
-        <button id="startBtn" class="small">START MATCH</button>
-        <span id="waitMsg">Waiting for the host to start…</span>
-        <button id="leaveBtn" class="small ghost">LEAVE</button>
+      <div class="room-banner">
+        <div class="room-code">PRIVATE MATCH CODE <b id="roomCode"></b></div>
+        <span class="room-status" id="roomStatus">WAITING FOR PLAYERS</span>
       </div>
+      <a id="roomLink" target="_blank" rel="noopener">Copy invite link</a>
+      <div class="room-mode-row">
+        <span>GAME MODE · HOST SETTINGS</span>
+        <select id="modeRoomSel">
+          <option value="solo">SOLO BATTLE ROYALE</option>
+          <option value="duos">DUOS BATTLE ROYALE</option>
+          <option value="zero">ZERO BUILD</option>
+          <option value="sniper">SNIPER SHOWDOWN</option>
+          <option value="rumble">TEAM RUMBLE</option>
+        </select>
+        <p class="mode-desc" id="roomModeDesc"></p>
+      </div>
+      <div class="roster-head"><span>PARTY ROSTER</span><span id="readyCount">1 / 1 READY</span></div>
+      <div id="playerList"></div>
+      <label id="botsRow"><input type="checkbox" id="botsChk" checked> Fill remaining player slots with AI fighters (24 total)</label>
+      <div class="lobby-footer">
+        <div class="lobby-actions">
+          <button id="readyBtn" class="small ghost">READY UP</button>
+          <button id="startBtn" class="small" disabled>START MATCH</button>
+          <button id="leaveBtn" class="small ghost">LEAVE</button>
+        </div>
+      </div>
+      <div id="waitMsg">Waiting for all players to get ready…</div>
+      <div class="err" id="lobbyErr"></div>
     </div>
   </div>
   <div class="tabs" id="ctrlTabs">
