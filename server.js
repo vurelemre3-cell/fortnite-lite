@@ -206,8 +206,11 @@ server.on('upgrade', (req, socket, head) => {
 
 /* -------------------------------- lobbies --------------------------------- */
 
-const rooms = new Map();          // code -> { code, hostId, next, clients: Map<id, client>, locked }
+const rooms = new Map();          // code -> { code, hostId, next, clients, locked, mode }
 const ROOM_MAX = 16;
+const MODE_IDS = new Set(['solo', 'duos', 'zero', 'sniper', 'rumble']);
+function cleanMode(mode) { return MODE_IDS.has(String(mode || '')) ? String(mode) : 'solo'; }
+function roomLimit(mode) { return mode === 'rumble' ? 12 : ROOM_MAX; }
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';   // no I / O — they read as 1 / 0
 
 function makeCode() {
@@ -224,14 +227,16 @@ function cleanSkin(s) {
   return /^char_[a-z_]{1,24}$/.test(String(s)) ? String(s) : 'char_knight';
 }
 function playerList(room) {
-  return Array.from(room.clients.values()).map(c => ({ id: c.id, name: c.name, skin: c.skin }));
+  return Array.from(room.clients.values()).map(c => ({ id: c.id, name: c.name, skin: c.skin, ready: !!c.ready }));
 }
 function send(c, m) { c.ws.send(JSON.stringify(m)); }
 function broadcast(room, m, except) {
   const s = JSON.stringify(m);
   for (const c of room.clients.values()) if (c !== except) c.ws.send(s);
 }
-function announce(room) { broadcast(room, { t: 'players', hostId: room.hostId, players: playerList(room) }); }
+function announce(room) {
+  broadcast(room, { t: 'players', hostId: room.hostId, players: playerList(room), mode: room.mode, locked: room.locked });
+}
 
 const sockets = new Set();      // every live connection, for the heartbeat below
 
@@ -251,26 +256,57 @@ function handle(c, m) {
   switch (m.t) {
     case 'create': {
       leave(c);
-      const room = { code: makeCode(), hostId: 1, next: 2, clients: new Map(), locked: false };
-      c.id = 1; c.name = cleanName(m.name); c.skin = cleanSkin(m.skin); c.room = room;
+      const mode = cleanMode(m.mode);
+      const room = { code: makeCode(), hostId: 1, next: 2, clients: new Map(), locked: false, mode };
+      c.id = 1; c.name = cleanName(m.name); c.skin = cleanSkin(m.skin); c.room = room; c.ready = true;
       room.clients.set(c.id, c);
       rooms.set(room.code, room);
-      send(c, { t: 'joined', id: c.id, code: room.code, hostId: room.hostId, players: playerList(room) });
+      send(c, { t: 'joined', id: c.id, code: room.code, hostId: room.hostId, players: playerList(room), mode });
       break;
     }
     case 'join': {
       const room = rooms.get(String(m.code || '').toUpperCase());
       if (!room) { send(c, { t: 'err', msg: 'No lobby with that code' }); return; }
       if (room.locked) { send(c, { t: 'err', msg: 'That lobby is mid-match — wait for it to finish' }); return; }
-      if (room.clients.size >= ROOM_MAX) { send(c, { t: 'err', msg: 'That lobby is full' }); return; }
+      if (room.clients.size >= Math.min(ROOM_MAX, roomLimit(room.mode))) { send(c, { t: 'err', msg: 'That lobby is full for this game mode' }); return; }
       leave(c);
-      c.id = room.next++; c.name = cleanName(m.name); c.skin = cleanSkin(m.skin); c.room = room;
+      c.id = room.next++; c.name = cleanName(m.name); c.skin = cleanSkin(m.skin); c.room = room; c.ready = false;
       room.clients.set(c.id, c);
-      send(c, { t: 'joined', id: c.id, code: room.code, hostId: room.hostId, players: playerList(room) });
+      send(c, { t: 'joined', id: c.id, code: room.code, hostId: room.hostId, players: playerList(room), mode: room.mode });
       announce(room);
       break;
     }
     case 'leave': leave(c); break;
+    case 'mode': {
+      const room = c.room;
+      if (!room || room.locked || room.hostId !== c.id) return;
+      const mode = cleanMode(m.mode);
+      if (room.clients.size > roomLimit(mode)) { send(c, { t: 'err', msg: 'This mode allows up to ' + roomLimit(mode) + ' people in the lobby' }); return; }
+      if (room.mode !== mode) {
+        room.mode = mode;
+        for (const player of room.clients.values()) player.ready = player.id === room.hostId;
+        announce(room);
+      }
+      break;
+    }
+    case 'ready': {
+      const room = c.room;
+      if (!room || room.locked) return;
+      c.ready = !!m.ready;
+      announce(room);
+      break;
+    }
+    case 'launch': {
+      const room = c.room, game = m.game;
+      if (!room || room.locked || room.hostId !== c.id) return;
+      if (!game || !Array.isArray(game.humans)) { send(c, { t: 'err', msg: 'The match setup is incomplete' }); return; }
+      if (room.clients.size > roomLimit(room.mode)) { send(c, { t: 'err', msg: 'Too many players for this mode' }); return; }
+      if (Array.from(room.clients.values()).some(player => !player.ready)) { send(c, { t: 'err', msg: 'Wait until every player is ready' }); return; }
+      room.locked = true;
+      const start = Object.assign({}, game, { t: 'start', mode: room.mode });
+      broadcast(room, start, c);
+      break;
+    }
     case 'lock': if (c.room && c.room.hostId === c.id) c.room.locked = !!m.on; break;
     case 'to': {
       const room = c.room;
@@ -294,6 +330,8 @@ function leave(c) {
   if (wasHost) {
     room.hostId = Math.min(...room.clients.keys());
     room.locked = false;
+    const nextHost = room.clients.get(room.hostId);
+    if (nextHost) nextHost.ready = true;
     broadcast(room, { t: 'hostLeft', hostId: room.hostId });
   }
   announce(room);
