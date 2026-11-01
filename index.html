@@ -87,27 +87,13 @@
     border-radius:4px; background:rgba(255,255,255,.10); color:#cfe6ff; box-shadow:none; }
   .tabs button[aria-selected="true"] { background:linear-gradient(180deg,#8ee2ff,#2ea7e6); color:#04121f; }
   .keys.pad b { color:var(--blue); }
-  /* lobby */
-  #lobby { display:flex; flex-direction:column; align-items:center; gap:10px; width:min(560px,92vw);
-    background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.12); border-radius:10px; padding:16px 20px; }
+  /* lobby shell; detailed layout rules live above so the old layout cannot override them */
+  #lobby { display:flex; flex-direction:column; align-items:center; gap:10px; width:min(650px,94vw);
+    background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.12); border-radius:10px; padding:16px 18px; }
   #lobby h3 { margin:0; font-size:13px; letter-spacing:.18em; opacity:.8; text-transform:uppercase; }
-  #lobby .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; justify-content:center; }
-  #lobby input, #lobby select { font:700 15px system-ui, sans-serif; padding:9px 12px; border-radius:6px;
-    border:1px solid rgba(255,255,255,.2); background:rgba(0,0,0,.35); color:#fff; outline:none; }
-  #lobby input:focus, #lobby select:focus { border-color:var(--blue); }
-  #lobby select option { color:#000; }
-  #codeIn { width:96px; text-transform:uppercase; letter-spacing:.2em; text-align:center; }
-  #lobby button.small { font-size:13px; padding:10px 20px; box-shadow:0 4px 0 #14618c; }
-  #lobby button.small:active { transform:translateY(3px); box-shadow:0 1px 0 #14618c; }
-  #lobby button.ghost { background:rgba(255,255,255,.12); color:#cfe6ff; box-shadow:none; }
-  #lobby .err { color:#ff8a8a; font-size:13px; min-height:16px; }
-  #lobby .code { font-size:15px; letter-spacing:.12em; }
-  #lobby .code b { font-size:30px; color:var(--gold); letter-spacing:.3em; margin-left:6px; }
   #lobby a { color:var(--blue); font-size:12px; word-break:break-all; }
-  #playerList { display:flex; flex-direction:column; gap:3px; font-size:14px; min-width:220px; }
-  #playerList div { padding:4px 10px; background:rgba(0,0,0,.25); border-radius:4px; text-align:left; }
-  #botsRow { font-size:13px; opacity:.85; display:flex; gap:8px; align-items:center; }
-  #waitMsg { font-size:13px; opacity:.7; }
+  #codeIn { text-transform:uppercase; letter-spacing:.2em; text-align:center; }
+  #lobby button.small:active { transform:translateY(3px); box-shadow:0 1px 0 #14618c; }
   #settingsPanel { width:min(560px,92vw); border:1px solid rgba(127,216,255,.24);
     border-radius:9px; background:rgba(5,13,27,.72); text-align:left; }
   #settingsPanel summary { cursor:pointer; list-style:none; padding:11px 16px;
