@@ -1143,7 +1143,8 @@ function openChest(ch, e) {
   chestBurst(ch, e);
 }
 function chestBurst(ch, e) {
-  spawnParticles(ch.x, ch.y + 0.8, ch.z, 14, [1.0, 0.85, 0.35], 3.5, 0.1, 0.8, 6);
+  spawnParticles(ch.x, ch.y + 0.9, ch.z, 26, [1.0, 0.83, 0.34], 5.2, 0.12, 1.0, 8);
+  spawnParticles(ch.x, ch.y + 1.3, ch.z, 10, [0.55, 0.82, 1.0], 2.8, 0.08, 0.65, 5);
   if (e) { sfxNear(e, () => Sfx.chest()); if (e === G.player) say('CHEST OPENED'); }
 }
 
@@ -1840,8 +1841,13 @@ function renderScene() {
     } else {
       R.box(ch.x, ch.y + 0.45 + bob, ch.z, 1.4, 0.9, 1.0, ch.opened ? COL_CHEST_OPEN : COL_CHEST, ch.rot || 0);
     }
-    if (!ch.opened) {   // a soft golden glow so unopened chests read from across a room
-      R.push(MESH_SPHERE, ch.x, ch.y + 0.6 + bob, ch.z, 0, 0, 2.6, 1.6, 2.4, 1.0, 0.85, 0.35, 0.10);
+    if (!ch.opened) {   // warm pulsing gold light and a small floor ring advertise a chest nearby
+      const pulse = 0.82 + 0.18 * Math.sin(G.t * 3.2 + ch.t);
+      R.push(MESH_SPHERE, ch.x, ch.y + 0.65 + bob, ch.z, 0, G.t * 0.24, 2.9 * pulse, 1.7 * pulse, 2.7 * pulse, 1.0, 0.78, 0.28, 0.13);
+      R.push(MESH_CYL, ch.x, ch.y + 0.035, ch.z, 0, 0, 1.35 * pulse, 0.035, 1.05 * pulse, 1.0, 0.76, 0.22, 0.24);
+    } else if (ch.openT < 0.75) {
+      const flash = 1 - ch.openT / 0.75;
+      R.push(MESH_SPHERE, ch.x, ch.y + 1.35 + bob, ch.z, 0, 0, 2.3 * flash, 2.0 * flash, 2.3 * flash, 1.0, 0.84, 0.42, 0.18 * flash);
     }
   }
 
@@ -2140,9 +2146,15 @@ function drawLoot(l) {
       for (let i = 0; i < 3; i++) R.push(MESH_CUBE, l.x, y - 0.2 + i * 0.16, l.z, spin + i * 0.3, 0, 0.7 * s, 0.14 * s, 0.22 * s, col[0], col[1], col[2], 1);
     }
   }
-  // rarity beacon + ground disc
-  R.box(l.x, l.y + 2.0, l.z, 0.45, 3.6, 0.45, col, 0, 0.14);
-  R.push(MESH_CYL, l.x, l.y + 0.03, l.z, 0, 0, 0.7, 0.05, 0.7, col[0], col[1], col[2], 0.35);
+  // A rarity beam and pulsing floor marker make dropped loot readable at a glance.
+  const pulse = 0.76 + 0.24 * Math.sin(G.t * 3.1 + l.spin);
+  R.push(MESH_CYL, l.x, l.y + 1.72, l.z, 0, 0, 0.18, 3.35, 0.18, col[0], col[1], col[2], 0.075 * pulse);
+  R.line(l.x, l.y + 0.12, l.z, l.x, l.y + 3.55, l.z, 0.025, col, 0.32 * pulse);
+  R.push(MESH_CYL, l.x, l.y + 0.035, l.z, 0, 0, 0.78 * pulse, 0.045, 0.78 * pulse, col[0], col[1], col[2], 0.32);
+  R.push(MESH_CYL, l.x, l.y + 0.08, l.z, 0, 0, 0.46, 0.025, 0.46, 1, 1, 1, 0.12);
+  if (l.kind === 'weapon' && l.data.item.rar >= 3) {
+    R.push(MESH_SPHERE, l.x, y + 0.15, l.z, 0, G.t * 0.9, 0.72, 0.72, 0.72, col[0], col[1], col[2], 0.12 * pulse);
+  }
 }
 
 /* ------------------------------- characters -------------------------------- */
@@ -2456,19 +2468,50 @@ function bar(x, y, w, h, k, col, bg) {
   hud.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
 }
 
+function hudRoundRect(x, y, w, h, r) {
+  const rr = Math.min(r, w / 2, h / 2);
+  hud.beginPath();
+  hud.moveTo(x + rr, y);
+  hud.lineTo(x + w - rr, y); hud.quadraticCurveTo(x + w, y, x + w, y + rr);
+  hud.lineTo(x + w, y + h - rr); hud.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
+  hud.lineTo(x + rr, y + h); hud.quadraticCurveTo(x, y + h, x, y + h - rr);
+  hud.lineTo(x, y + rr); hud.quadraticCurveTo(x, y, x + rr, y); hud.closePath();
+}
+function hudPanel(x, y, w, h, fill, stroke, radius) {
+  hudRoundRect(x, y, w, h, radius || 7);
+  hud.fillStyle = fill || 'rgba(5,10,20,.72)'; hud.fill();
+  if (stroke) { hud.strokeStyle = stroke; hud.lineWidth = 1.3; hud.stroke(); }
+}
+function drawHudStat(x, y, width, label, value, color, kind) {
+  const pct = clamp(value / 100, 0, 1);
+  hud.font = '900 9px system-ui, sans-serif'; hud.textAlign = 'left';
+  hud.fillStyle = 'rgba(235,245,255,.88)';
+  hud.fillText(label, x, y - 5);
+  hud.textAlign = 'right'; hud.font = '900 12px system-ui, sans-serif';
+  hud.fillStyle = '#fff'; hud.fillText(Math.ceil(value), x + width, y - 5);
+  const grad = hud.createLinearGradient(x, y, x + width, y + 12);
+  grad.addColorStop(0, color); grad.addColorStop(1, kind === 'shield' ? '#1475c9' : '#168c54');
+  hudPanel(x, y + 4, width, 12, 'rgba(0,0,0,.55)', 'rgba(255,255,255,.26)', 4);
+  if (pct > 0) {
+    hudRoundRect(x + 1, y + 5, Math.max(2, (width - 2) * pct), 10, 3);
+    hud.fillStyle = grad; hud.fill();
+    hud.fillStyle = 'rgba(255,255,255,.20)'; hud.fillRect(x + 4, y + 6, Math.max(0, (width - 8) * pct), 2);
+  }
+}
 function drawBars(W, H) {
-  const p = G.player, x = 26, w = 300, h = 20;
-  let y = H - 152;   // sits above the hotbar, never under it
-  bar(x, y, w, h, p.shield / 100, '#3fb8ff');
-  y += h + 4;
-  bar(x, y, w, h, p.hp / 100, p.hp > 50 ? '#5ee06a' : '#e05e5e');
-  hud.font = '800 15px system-ui, sans-serif'; hud.textAlign = 'left'; hud.fillStyle = '#fff';
-  hud.fillText(Math.ceil(p.shield) + '', x + w + 10, y - h / 2 - 2);
-  hud.fillText(Math.ceil(p.hp) + '', x + w + 10, y + h / 2);
+  const p = G.player, x = 24, y = H - 151;
+  hudPanel(x, y, 292, 59, 'rgba(4,10,20,.68)', 'rgba(255,255,255,.16)', 9);
+  // shield and health are stacked like a compact battle-royale status card
+  hud.fillStyle = '#59c9ff'; hud.font = '900 13px system-ui, sans-serif'; hud.textAlign = 'left';
+  hud.fillText('◆', x + 10, y + 20);
+  hud.fillStyle = '#6be78a'; hud.fillText('♥', x + 10, y + 43);
+  drawHudStat(x + 31, y + 12, 247, 'SHIELD', p.shield, '#5dc9ff', 'shield');
+  drawHudStat(x + 31, y + 35, 247, 'HEALTH', p.hp, p.hp > 50 ? '#6be78a' : '#ff6b67', 'health');
   if (p.useT > 0) {
-    bar(W / 2 - 110, H - 200, 220, 14, 1 - p.useT / (p.useKind === 'shield' ? 2.2 : 3.6), '#ffffff');
-    hud.textAlign = 'center'; hud.fillStyle = '#fff';
-    hud.fillText('USING ' + p.useKind.toUpperCase(), W / 2, H - 215);
+    hudPanel(W / 2 - 122, H - 206, 244, 30, 'rgba(4,10,20,.78)', 'rgba(255,255,255,.22)', 7);
+    hud.textAlign = 'center'; hud.fillStyle = '#fff'; hud.font = '900 10px system-ui, sans-serif';
+    hud.fillText('USING ' + p.useKind.toUpperCase(), W / 2, H - 197);
+    bar(W / 2 - 110, H - 189, 220, 7, 1 - p.useT / (p.useKind === 'shield' ? 2.2 : 3.6), '#67d6ff');
   }
 }
 
@@ -2495,86 +2538,90 @@ function drawItemIcon(id, x, y, w, h, col) {
 
 function drawSlots(W, H) {
   const p = G.player;
-  const sw = 84, sh = 58, gap = 6;
+  const sw = 82, sh = 64, gap = 7;
   const total = 5 * sw + 4 * gap;
-  const x0 = W / 2 - total / 2, y = H - 78;
+  const x0 = W / 2 - total / 2, y = H - 84;
+  hudPanel(x0 - 8, y - 7, total + 16, sh + 14, 'rgba(3,8,17,.62)', 'rgba(255,255,255,.13)', 10);
   for (let i = 0; i < 5; i++) {
-    const x = x0 + i * (sw + gap);
-    const it = p.inv[i];
+    const x = x0 + i * (sw + gap), it = p.inv[i];
     const sel = i === p.slot && !p.buildMode;
-    hud.fillStyle = sel ? 'rgba(255,255,255,.28)' : 'rgba(0,0,0,.5)';
-    hud.fillRect(x, y, sw, sh);
-    hud.strokeStyle = sel ? '#fff' : 'rgba(255,255,255,.25)';
-    hud.lineWidth = 2; hud.strokeRect(x, y, sw, sh);
-    hud.textAlign = 'center';
-    if (it) {
-      const c = RARITY[it.rar].col;
-      const css = `rgb(${c[0] * 255 | 0},${c[1] * 255 | 0},${c[2] * 255 | 0})`;
-      hud.fillStyle = css;
-      hud.fillRect(x + 2, y + sh - 6, sw - 4, 4);
-      drawItemIcon(it.id, x + sw / 2 - 20, y + 6, 40, 24, it.id === 'pickaxe' ? '#ddd' : css);
-      hud.fillStyle = '#fff'; hud.font = '700 10px system-ui, sans-serif';
-      const nm = it.id === 'pickaxe' ? 'PICKAXE' : it.id === 'shield' ? 'SHIELD' : it.id === 'medkit' ? 'MEDKIT'
-        : WEAPONS[it.id].name.toUpperCase();
-      if (WEAPONS[it.id] && WEAPONS[it.id].ammo) {
-        hud.font = '800 14px system-ui, sans-serif';
-        hud.fillText(it.mag + ' / ' + p.ammo[WEAPONS[it.id].ammo], x + sw / 2, y + 42);
-      } else hud.fillText(nm.slice(0, 12), x + sw / 2, y + 42);
+    const rarity = it ? RARITY[clamp(it.rar | 0, 0, RARITY.length - 1)] : null;
+    const c = rarity ? rarity.col : [0.36, 0.43, 0.53];
+    const css = `rgb(${c[0] * 255 | 0},${c[1] * 255 | 0},${c[2] * 255 | 0})`;
+    if (sel) {
+      hud.save(); hud.shadowColor = css; hud.shadowBlur = 14;
     }
-    hud.fillStyle = 'rgba(255,255,255,.6)'; hud.font = '700 10px system-ui, sans-serif';
-    hud.textAlign = 'left'; hud.fillText(i + 1, x + 5, y + 9);
-    // drop hint on the held slot
-    if (i === p.slot && i > 0 && it && !p.buildMode) {
-      hud.fillStyle = 'rgba(255,255,255,.55)'; hud.font = '700 10px system-ui, sans-serif';
-      hud.textAlign = 'center'; hud.fillText('[G] DROP', x + sw / 2, y + sh + 11);
+    hudPanel(x, y, sw, sh,
+      sel ? 'rgba(48,66,86,.97)' : 'rgba(12,20,31,.88)',
+      sel ? '#fff' : 'rgba(255,255,255,.25)', 7);
+    if (sel) hud.restore();
+    hudRoundRect(x + 2, y + sh - 7, sw - 4, 5, 3);
+    hud.fillStyle = it ? css : 'rgba(255,255,255,.10)'; hud.fill();
+    hud.textAlign = 'left'; hud.font = '900 10px system-ui, sans-serif';
+    hud.fillStyle = sel ? '#fff' : 'rgba(255,255,255,.60)';
+    hud.fillText(i + 1, x + 7, y + 10);
+    if (it) {
+      drawItemIcon(it.id, x + sw / 2 - 20, y + 9, 40, 24, it.id === 'pickaxe' ? '#e8edf2' : css);
+      const nm = it.id === 'pickaxe' ? 'PICKAXE' : it.id === 'shield' ? 'SHIELD' : it.id === 'medkit' ? 'MEDKIT'
+        : (WEAPONS[it.id] ? WEAPONS[it.id].name.toUpperCase() : it.id.toUpperCase());
+      if (WEAPONS[it.id] && WEAPONS[it.id].ammo) {
+        hud.textAlign = 'center'; hud.font = '900 13px system-ui, sans-serif'; hud.fillStyle = '#fff';
+        hud.fillText(String(it.mag), x + sw / 2 - 10, y + 43);
+        hud.font = '700 9px system-ui, sans-serif'; hud.fillStyle = 'rgba(255,255,255,.65)';
+        hud.fillText('/ ' + p.ammo[WEAPONS[it.id].ammo], x + sw / 2 + 15, y + 43);
+        hud.font = '800 8px system-ui, sans-serif'; hud.fillStyle = css;
+        hud.fillText(nm.slice(0, 13), x + sw / 2, y + 55);
+      } else {
+        hud.textAlign = 'center'; hud.font = '800 9px system-ui, sans-serif'; hud.fillStyle = '#fff';
+        hud.fillText(nm.slice(0, 13), x + sw / 2, y + 46);
+      }
+    } else {
+      hud.textAlign = 'center'; hud.font = '700 9px system-ui, sans-serif'; hud.fillStyle = 'rgba(255,255,255,.25)';
+      hud.fillText('EMPTY', x + sw / 2, y + 37);
     }
   }
   const held = curItem(p), heldW = held && WEAPONS[held.id];
   if (p.reloadT > 0 && heldW && heldW.reload) {
-    bar(W / 2 - 90, y - 26, 180, 12, 1 - p.reloadT / heldW.reload, '#ffcc44');
-    hud.textAlign = 'center'; hud.fillStyle = '#fff'; hud.font = '700 12px system-ui, sans-serif';
-    hud.fillText('RELOADING', W / 2, y - 36);
+    hudPanel(W / 2 - 96, y - 31, 192, 20, 'rgba(4,10,20,.82)', 'rgba(255,255,255,.18)', 5);
+    bar(W / 2 - 88, y - 22, 176, 6, 1 - p.reloadT / heldW.reload, '#ffcc44');
+    hud.textAlign = 'center'; hud.fillStyle = '#fff'; hud.font = '900 9px system-ui, sans-serif';
+    hud.fillText('RELOADING', W / 2, y - 39);
   }
-  // build bar
   if (p.buildMode) {
-    const bw = 74, by = y - 104;
-    const bx0 = W / 2 - (4 * bw + 3 * gap) / 2;
-    const labels = ['WALL [Z]', 'FLOOR [X]', 'RAMP [C]', 'CONE [V]'];
+    const bw = 78, bh = 55, by = y - 112, bgap = 7;
+    const bx0 = W / 2 - (4 * bw + 3 * bgap) / 2;
+    const labels = ['WALL [Z]', 'FLOOR [X]', 'STAIRS [C]', 'CONE [V]'];
+    hudPanel(bx0 - 8, by - 8, 4 * bw + 3 * bgap + 16, bh + 16, 'rgba(4,10,20,.82)', 'rgba(105,201,255,.28)', 8);
     for (let i = 0; i < 4; i++) {
-      const x = bx0 + i * (bw + gap);
-      hud.fillStyle = i === p.buildType ? 'rgba(90,200,255,.45)' : 'rgba(0,0,0,.5)';
-      hud.fillRect(x, by, bw, 46);
-      hud.strokeStyle = i === p.buildType ? '#7fd8ff' : 'rgba(255,255,255,.25)';
-      hud.lineWidth = 2; hud.strokeRect(x, by, bw, 46);
-      // piece glyph
-      hud.fillStyle = i === p.buildType ? '#fff' : 'rgba(255,255,255,.7)';
-      const gx = x + bw / 2, gy = by + 14;
+      const x = bx0 + i * (bw + bgap), selected = i === p.buildType;
+      hudPanel(x, by, bw, bh, selected ? 'rgba(32,125,186,.68)' : 'rgba(15,25,38,.92)',
+        selected ? '#8be0ff' : 'rgba(255,255,255,.20)', 6);
+      hud.fillStyle = selected ? '#fff' : 'rgba(255,255,255,.70)';
+      const gx = x + bw / 2, gy = by + 17;
       if (i === 0) hud.fillRect(gx - 9, gy - 8, 18, 14);
       else if (i === 1) hud.fillRect(gx - 12, gy + 1, 24, 5);
       else if (i === 2) { hud.beginPath(); hud.moveTo(gx - 12, gy + 7); hud.lineTo(gx + 12, gy - 8); hud.lineTo(gx + 12, gy + 7); hud.closePath(); hud.fill(); }
       else { hud.beginPath(); hud.moveTo(gx - 13, gy + 7); hud.lineTo(gx, gy - 8); hud.lineTo(gx + 13, gy + 7); hud.closePath(); hud.fill(); }
-      hud.font = '700 10px system-ui, sans-serif'; hud.textAlign = 'center';
-      hud.fillText(labels[i], x + bw / 2, by + 35);
+      hud.font = '900 9px system-ui, sans-serif'; hud.textAlign = 'center';
+      hud.fillText(labels[i], gx, by + 43);
     }
   }
 }
 
 function drawMats(W, H) {
-  const p = G.player;
-  const x = W - 200, y = H - 168;
+  const p = G.player, x = W - 184, y = H - 148;
+  hudPanel(x - 7, y - 7, 166, 88, 'rgba(4,10,20,.70)', 'rgba(255,255,255,.15)', 8);
   for (let i = 0; i < 3; i++) {
-    const c = MAT_COLOR[i];
-    const yy = y + i * 26;
-    hud.fillStyle = `rgba(0,0,0,${i === p.buildMat ? 0.7 : 0.4})`;
-    hud.fillRect(x, yy, 176, 24);
-    hud.fillStyle = `rgb(${c[0] * 255 | 0},${c[1] * 255 | 0},${c[2] * 255 | 0})`;
-    hud.fillRect(x + 4, yy + 4, 16, 16);
-    hud.fillStyle = i === p.buildMat ? '#fff' : 'rgba(255,255,255,.6)';
-    hud.font = '700 13px system-ui, sans-serif'; hud.textAlign = 'left';
-    hud.fillText(MAT_NAME[i] + '  ' + p.mats[i], x + 28, yy + 13);
-    if (i === p.buildMat) {
-      hud.textAlign = 'right'; hud.fillText('[T]', x + 170, yy + 13);
-    }
+    const c = MAT_COLOR[i], yy = y + i * 26;
+    const css = `rgb(${c[0] * 255 | 0},${c[1] * 255 | 0},${c[2] * 255 | 0})`;
+    hudPanel(x, yy, 152, 22, i === p.buildMat ? 'rgba(50,66,84,.88)' : 'rgba(0,0,0,.22)',
+      i === p.buildMat ? 'rgba(255,255,255,.60)' : 'rgba(255,255,255,.08)', 4);
+    hud.fillStyle = css; hudPanel(x + 5, yy + 4, 14, 14, css, null, 3);
+    hud.fillStyle = i === p.buildMat ? '#fff' : 'rgba(255,255,255,.72)';
+    hud.font = '900 11px system-ui, sans-serif'; hud.textAlign = 'left';
+    hud.fillText(MAT_NAME[i].toUpperCase(), x + 27, yy + 11);
+    hud.textAlign = 'right'; hud.font = '900 13px system-ui, sans-serif';
+    hud.fillStyle = '#fff'; hud.fillText(p.mats[i], x + 143, yy + 11);
   }
 }
 
@@ -2636,29 +2683,33 @@ function drawTargetInfo(W, H) {
 }
 
 function drawCompass(W, H) {
-  const p = G.player;
-  const cx = W / 2, y = 22, span = 260;
-  hud.fillStyle = 'rgba(0,0,0,.35)'; hud.fillRect(cx - span / 2, y - 12, span, 26);
-  const heading = -p.yaw;   // north is -Z
-  hud.font = '700 11px system-ui, sans-serif'; hud.textAlign = 'center';
-  const labels = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
-  for (let i = 0; i < 8; i++) {
-    const a = i * Math.PI / 4;
-    let d = angleDelta(heading, a);
-    if (Math.abs(d) > 1.1) continue;
-    const x = cx + d / 1.1 * (span / 2);
-    const k = 1 - Math.abs(d) / 1.1;
-    hud.fillStyle = `rgba(255,255,255,${0.35 + 0.65 * k})`;
-    hud.fillText(labels[i], x, y + 1);
+  const p = G.player, cx = W / 2, y = 26, span = 360, left = cx - span / 2;
+  hudPanel(left, y - 15, span, 30, 'rgba(4,10,20,.58)', 'rgba(255,255,255,.12)', 7);
+  const heading = -p.yaw; // north is -Z
+  // Small compass ticks every ten degrees, with cardinal letters and larger marks.
+  for (let deg = -70; deg <= 70; deg += 10) {
+    const a = heading + deg * Math.PI / 180;
+    const x = cx + deg / 70 * (span / 2 - 10);
+    const cardinal = Math.abs(deg % 90) < 0.01;
+    hud.strokeStyle = cardinal ? 'rgba(255,255,255,.90)' : 'rgba(255,255,255,.38)';
+    hud.lineWidth = cardinal ? 2 : 1;
+    hud.beginPath(); hud.moveTo(x, y - 8); hud.lineTo(x, y - (cardinal ? 2 : 4)); hud.stroke();
+    if (deg % 30 === 0) {
+      const dirs = ['N','NE','E','SE','S','SW','W','NW'];
+      const bearing = ((Math.round((a * 180 / Math.PI + 360) / 45) % 8) + 8) % 8;
+      hud.font = cardinal ? '900 11px system-ui, sans-serif' : '700 9px system-ui, sans-serif';
+      hud.textAlign = 'center'; hud.fillStyle = cardinal ? '#fff' : 'rgba(255,255,255,.74)';
+      hud.fillText(dirs[bearing], x, y + 5);
+    }
   }
-  // nearest POI name under the compass
+  hud.fillStyle = '#ffd24a'; hud.beginPath(); hud.moveTo(cx, y - 14); hud.lineTo(cx - 5, y - 7); hud.lineTo(cx + 5, y - 7); hud.closePath(); hud.fill();
   let best = null, bd = 1e9;
   for (const q of World.pois) { const d = dist2(p.pos[0], p.pos[2], q.x, q.z); if (d < bd) { bd = d; best = q; } }
   if (best && bd < 90 * 90) {
-    hud.fillStyle = 'rgba(255,255,255,.85)'; hud.font = '800 13px system-ui, sans-serif';
-    hud.fillText(best.name.toUpperCase(), cx, y + 26);
+    hudPanel(cx - 105, y + 20, 210, 20, 'rgba(4,10,20,.62)', null, 5);
+    hud.fillStyle = 'rgba(255,255,255,.90)'; hud.font = '900 10px system-ui, sans-serif'; hud.textAlign = 'center';
+    hud.fillText(best.name.toUpperCase(), cx, y + 30);
   }
-  hud.fillStyle = '#ffd24a'; hud.fillRect(cx - 1, y - 12, 2, 6);
 }
 
 // Terrain + roads + POIs painted once per match; the minimap just blits it.
@@ -2691,44 +2742,55 @@ function buildMinimap() {
 
 function drawTopRight(W, H) {
   const s = G.storm, p = G.player;
-  const R2 = 84, cx = W - R2 - 30, cy = R2 + 34;
+  const size = 174, x = W - size - 24, y = 24, cx = x + size / 2, cy = y + size / 2;
+  const k = size / (2 * HALF);
+  hudPanel(x - 5, y - 5, size + 10, size + 10, 'rgba(3,8,16,.86)', 'rgba(255,255,255,.52)', 11);
+  // Fortnite-like square minimap with a rounded glass frame.
   hud.save();
-  hud.beginPath(); hud.arc(cx, cy, R2, 0, Math.PI * 2); hud.clip();
-  if (G.mini) hud.drawImage(G.mini, cx - R2, cy - R2, R2 * 2, R2 * 2);
-  else { hud.fillStyle = '#2c4a2c'; hud.fillRect(cx - R2, cy - R2, R2 * 2, R2 * 2); }
-  const k = R2 / HALF;
-  // storm + next circle
-  hud.fillStyle = 'rgba(150,60,230,.34)';
-  hud.fillRect(cx - R2, cy - R2, R2 * 2, R2 * 2);
+  hudRoundRect(x, y, size, size, 7); hud.clip();
+  if (G.mini) hud.drawImage(G.mini, x, y, size, size);
+  else { hud.fillStyle = '#2b4b2d'; hud.fillRect(x, y, size, size); }
+  hud.strokeStyle = 'rgba(255,255,255,.10)'; hud.lineWidth = 1;
+  for (let i = 1; i < 4; i++) {
+    hud.beginPath(); hud.moveTo(x + i * size / 4, y); hud.lineTo(x + i * size / 4, y + size); hud.stroke();
+    hud.beginPath(); hud.moveTo(x, y + i * size / 4); hud.lineTo(x + size, y + i * size / 4); hud.stroke();
+  }
+  // storm outside the current safe circle, then restore the map inside it.
+  hud.fillStyle = 'rgba(125,57,211,.42)'; hud.fillRect(x, y, size, size);
   hud.globalCompositeOperation = 'destination-out';
   hud.beginPath(); hud.arc(cx + s.cx * k, cy + s.cz * k, s.r * k, 0, Math.PI * 2); hud.fill();
   hud.globalCompositeOperation = 'source-over';
   if (G.mini) {
     hud.save(); hud.beginPath(); hud.arc(cx + s.cx * k, cy + s.cz * k, s.r * k, 0, Math.PI * 2); hud.clip();
-    hud.drawImage(G.mini, cx - R2, cy - R2, R2 * 2, R2 * 2); hud.restore();
+    hud.drawImage(G.mini, x, y, size, size); hud.restore();
   }
-  hud.strokeStyle = 'rgba(255,255,255,.85)'; hud.lineWidth = 1.5;
+  hud.strokeStyle = 'rgba(255,255,255,.94)'; hud.lineWidth = 1.5;
   hud.beginPath(); hud.arc(cx + s.tcx * k, cy + s.tcz * k, s.tr * k, 0, Math.PI * 2); hud.stroke();
-  hud.strokeStyle = 'rgba(180,90,255,.9)'; hud.lineWidth = 2;
+  hud.strokeStyle = '#d38bff'; hud.lineWidth = 2;
   hud.beginPath(); hud.arc(cx + s.cx * k, cy + s.cz * k, s.r * k, 0, Math.PI * 2); hud.stroke();
-  // player arrow
+  // player marker and heading triangle.
   const px = cx + p.pos[0] * k, pz = cy + p.pos[2] * k;
   hud.save(); hud.translate(px, pz); hud.rotate(-p.yaw);
-  hud.fillStyle = '#fff'; hud.strokeStyle = 'rgba(0,0,0,.6)'; hud.lineWidth = 1.5; hud.beginPath();
-  hud.moveTo(0, -6); hud.lineTo(4.5, 5); hud.lineTo(-4.5, 5); hud.closePath(); hud.fill(); hud.stroke();
+  hud.shadowColor = '#fff'; hud.shadowBlur = 7;
+  hud.fillStyle = '#fff'; hud.strokeStyle = 'rgba(0,0,0,.85)'; hud.lineWidth = 1.7;
+  hud.beginPath(); hud.moveTo(0, -7); hud.lineTo(5, 5); hud.lineTo(0, 2.5); hud.lineTo(-5, 5); hud.closePath(); hud.fill(); hud.stroke();
   hud.restore();
   hud.restore();
-  hud.strokeStyle = 'rgba(255,255,255,.55)'; hud.lineWidth = 2;
-  hud.beginPath(); hud.arc(cx, cy, R2, 0, Math.PI * 2); hud.stroke();
-
-  hud.textAlign = 'right';
-  hud.font = '800 20px system-ui, sans-serif'; hud.fillStyle = '#fff';
-  hud.fillText(G.mode === 'rumble' ? ('BLUE  ' + G.teamScores[0] + '  —  ' + G.teamScores[1] + '  RED') : (G.alive + ' ALIVE'), W - 30, cy + R2 + 22);
-  hud.font = '700 13px system-ui, sans-serif';
-  hud.fillStyle = s.shrinking ? '#c98bff' : 'rgba(255,255,255,.75)';
-  hud.fillText(stormLabel(s), W - 30, cy + R2 + 44);
-  hud.fillStyle = 'rgba(255,255,255,.75)';
-  hud.fillText('ELIMS  ' + G.player.kills, W - 30, cy + R2 + 64);
+  hudPanel(x, y - 18, 52, 15, 'rgba(3,8,16,.78)', null, 4);
+  hud.font = '900 8px system-ui, sans-serif'; hud.textAlign = 'center'; hud.fillStyle = '#dcecff';
+  hud.fillText('TACTICAL MAP', x + 26, y - 10);
+  const infoY = y + size + 9;
+  hudPanel(x - 1, infoY, size + 2, 44, 'rgba(3,8,16,.78)', 'rgba(255,255,255,.18)', 7);
+  hud.textAlign = 'left'; hud.font = '900 10px system-ui, sans-serif'; hud.fillStyle = '#fff';
+  hud.fillText(G.mode === 'rumble' ? 'TEAM SCORE' : 'PLAYERS LEFT', x + 9, infoY + 12);
+  hud.textAlign = 'right'; hud.font = '900 15px system-ui, sans-serif';
+  hud.fillStyle = G.mode === 'rumble' ? '#8bd2ff' : '#fff';
+  hud.fillText(G.mode === 'rumble' ? (G.teamScores[0] + '  —  ' + G.teamScores[1]) : String(G.alive), x + size - 9, infoY + 12);
+  hud.textAlign = 'left'; hud.font = '800 9px system-ui, sans-serif';
+  hud.fillStyle = s.shrinking ? '#d69aff' : '#8bd2ff';
+  hud.fillText(stormLabel(s).toUpperCase(), x + 9, infoY + 31);
+  hud.textAlign = 'right'; hud.fillStyle = 'rgba(255,255,255,.82)';
+  hud.fillText('ELIMS  ' + p.kills, x + size - 9, infoY + 31);
 }
 
 function drawFeed(W, H) {
@@ -2791,32 +2853,35 @@ function drawLootLabels() {
     if (!projectPoint(R.vp, l.x, l.y + 1.15, l.z, W, H, _scr)) continue;
     const name = lootName(l);
     const c = lootColor(l);
-    hud.font = '700 ' + (13 * S).toFixed(1) + 'px system-ui, sans-serif';
-    const w = hud.measureText(name).width + 14 * S;
-    // a pile of loot would stack every tag on the same pixel — lift until it's clear
+    const rarity = l.kind === 'weapon' ? RARITY[l.data.item.rar] : null;
+    const title = rarity ? rarity.name.toUpperCase() + '  •  ' + name : name;
+    hud.font = '900 ' + (12 * S).toFixed(1) + 'px system-ui, sans-serif';
+    const w = hud.measureText(title).width + 22 * S;
+    // Avoid collisions when several loot beams sit close together.
     let x = _scr[0] - w / 2, y = _scr[1] - h / 2;
     for (let g = 0; g < 8; g++) {
       const clash = placed.some(r => x < r.x + r.w && x + w > r.x && y < r.y + r.h && y + h > r.y);
       if (!clash) break;
-      y -= h + 2 * S;
+      y -= h + 3 * S;
     }
     placed.push({ x, y, w, h });
     const isAimed = l === aimed;
     const fade = clamp(1 - Math.sqrt(near[i].d) / LABEL_RANGE, 0, 1);
-    hud.globalAlpha = isAimed ? 1 : 0.4 + 0.6 * fade;
-    hud.fillStyle = isAimed ? 'rgba(0,0,0,.85)' : 'rgba(0,0,0,.66)';
-    hud.fillRect(x, y, w, h);
+    hud.globalAlpha = isAimed ? 1 : 0.42 + 0.58 * fade;
+    hudPanel(x, y, w, h + 2 * S, isAimed ? 'rgba(5,13,24,.94)' : 'rgba(5,11,20,.78)',
+      isAimed ? 'rgba(255,255,255,.96)' : 'rgba(255,255,255,.16)', 4 * S);
     hud.fillStyle = `rgb(${c[0] * 255 | 0},${c[1] * 255 | 0},${c[2] * 255 | 0})`;
-    hud.fillRect(x, y + h - 2.5 * S, w, 2.5 * S);
-    if (isAimed) { hud.strokeStyle = '#fff'; hud.lineWidth = 1.5 * S; hud.strokeRect(x, y, w, h); }
-    hud.fillStyle = '#fff';
-    hud.fillText(name, x + w / 2, y + h / 2);
-    // prompt on the one you are pointing at — that is what E / X takes
+    hudRoundRect(x + 2 * S, y + h - 3 * S, w - 4 * S, 3 * S, 2 * S); hud.fill();
+    hud.fillStyle = '#fff'; hud.font = '900 ' + (11 * S).toFixed(1) + 'px system-ui, sans-serif';
+    hud.fillText(title, x + w / 2, y + h / 2);
+    // The pickup prompt is shown only for the exact item E / X will collect.
     if (isAimed) {
-      hud.font = '700 ' + (11 * S).toFixed(1) + 'px system-ui, sans-serif';
-      hud.fillStyle = '#ffd24a';
+      hud.font = '900 ' + (10 * S).toFixed(1) + 'px system-ui, sans-serif';
       const full = l.kind !== 'ammo' && l.kind !== 'mats' && !p.inv.some((x2, i2) => i2 > 0 && !x2);
-      hud.fillText(grab + ' ' + (full ? 'SWAP' : 'PICK UP'), x + w / 2, y - 9 * S);
+      const prompt = grab + ' ' + (full ? 'SWAP' : 'PICK UP');
+      const pw = hud.measureText(prompt).width + 16 * S;
+      hudPanel(_scr[0] - pw / 2, y - 22 * S, pw, 17 * S, 'rgba(255,205,68,.96)', 'rgba(0,0,0,.32)', 4 * S);
+      hud.fillStyle = '#15202c'; hud.fillText(prompt, _scr[0], y - 13.5 * S);
     }
   }
   hud.globalAlpha = 1;
