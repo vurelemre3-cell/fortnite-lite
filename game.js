@@ -64,6 +64,7 @@ const G = {
   recoilScale: 1,           // FN.recoil(scale): multiplier on every kick (0 = none)
   bus: null, mini: null, menuT: 0,
   spec: null,               // entity the camera follows after dying in a lobby match
+  vehicles: [],             // drivable local vehicles: cars, planes and helicopters
 };
 
 let R = null, hudCv = null, hud = null;
@@ -80,6 +81,7 @@ const _av = [0, 0, 0], _bv = [0, 0, 0], _cv = [0, 0, 0], _camv = [0, 0, 0];
 function makeEntity(isBot, name, color, skin) {
   return {
     isBot, name, color, skin,
+    vehicle: null,
     id: 0, human: !isBot, remote: false, team: 0, respawnT: 0,   // remote = driven by the network, not simulated here
     pos: [0, 0, 0], vel: [0, 0, 0],
     yaw: 0, pitch: 0,
@@ -129,6 +131,7 @@ function newMatch(setup) {
   G.hurtDirs.length = 0; G.elimFlash = 0; G.hurtFlash = 0;
   G.spec = null;
   const pois = withSeed(setup.seed, generateWorld);
+  G.vehicles = withSeed((setup.seed ^ 0x51A7C0DE) >>> 0, () => createVehicles(pois));
   if (R) {   // R is null in headless harnesses
     R.setTerrain(buildTerrainMesh());
     const sp = buildSplat();
@@ -829,6 +832,106 @@ function tryBuild(e) {
 
 /* --------------------------------- player ---------------------------------- */
 
+
+/* ------------------------------ vehicles ---------------------------------- */
+// Lightweight drivable vehicles. They are local to each client for now; player
+// movement still uses the normal network pose relay.
+function createVehicles(pois) {
+  const out = [];
+  const kinds = ['car', 'car', 'plane', 'heli', 'car', 'heli'];
+  for (let i = 0; i < kinds.length; i++) {
+    const poi = pois[i % Math.max(1, pois.length)] || { x: 0, z: 0 };
+    const a = i * 2.399 + 0.7, d = 18 + (i % 3) * 7;
+    const x = clamp(poi.x + Math.cos(a) * d, -HALF + 12, HALF - 12);
+    const z = clamp(poi.z + Math.sin(a) * d, -HALF + 12, HALF - 12);
+    out.push({ kind: kinds[i], x, y: terrainHeight(x, z) + 0.12, z,
+      yaw: a + Math.PI, speed: 0, lift: 0, rotor: 0, occupied: false });
+  }
+  return out;
+}
+function nearestVehicle(e, maxDist) {
+  let best = null, bd = maxDist * maxDist;
+  for (const v of G.vehicles) {
+    if (v.occupied) continue;
+    const d = dist2(e.pos[0], e.pos[2], v.x, v.z);
+    if (d < bd) { bd = d; best = v; }
+  }
+  return best;
+}
+function enterVehicle(e) {
+  const v = nearestVehicle(e, 8);
+  if (!v) { say('NO VEHICLE NEARBY'); return; }
+  v.occupied = true; v.driver = e; e.vehicle = v; e.vel.fill(0);
+  e.yaw = v.yaw; e.buildMode = false; cancelActions(e);
+  say(v.kind === 'car' ? 'CAR ENTERED — WASD TO DRIVE · F TO EXIT' :
+      v.kind === 'plane' ? 'PLANE ENTERED — W/S THROTTLE · SPACE/CTRL ALTITUDE · F EXIT' :
+      'HELICOPTER ENTERED — W/S MOVE · SPACE/CTRL ALTITUDE · F EXIT');
+}
+function leaveVehicle(e) {
+  const v = e.vehicle;
+  if (!v) return;
+  const side = Math.cos(v.yaw) * 3;
+  e.pos[0] = clamp(v.x + side, -HALF + 2, HALF - 2);
+  e.pos[2] = clamp(v.z - Math.sin(v.yaw) * 3, -HALF + 2, HALF - 2);
+  e.pos[1] = terrainHeight(e.pos[0], e.pos[2]) + 0.05;
+  v.occupied = false; v.driver = null; v.speed = 0; v.lift = 0;
+  e.vehicle = null; e.vel.fill(0); e.grounded = true;
+  say('VEHICLE EXITED');
+}
+function updateVehiclePlayer(e, dt, ix, iz) {
+  const v = e.vehicle;
+  if (Input.hit('KeyF')) { leaveVehicle(e); return; }
+  const turn = (ix || (Input.down('KeyA') ? -1 : 0) || (Input.down('KeyD') ? 1 : 0));
+  v.yaw = wrapAngle(v.yaw + turn * dt * (v.kind === 'car' ? 1.65 : 1.05) * (Math.abs(v.speed) > 1 ? 1 : 0.5));
+  const throttle = (Input.down('KeyW') || iz > 0 ? 1 : 0) - (Input.down('KeyS') || iz < 0 ? 1 : 0);
+  const max = v.kind === 'car' ? 24 : v.kind === 'plane' ? 42 : 25;
+  v.speed += throttle * (v.kind === 'car' ? 18 : 12) * dt;
+  v.speed *= Math.pow(v.kind === 'car' ? 0.985 : 0.992, dt * 60);
+  v.speed = clamp(v.speed, -max * 0.45, max);
+  const fx = -Math.sin(v.yaw), fz = -Math.cos(v.yaw);
+  v.x = clamp(v.x + fx * v.speed * dt, -HALF + 5, HALF - 5);
+  v.z = clamp(v.z + fz * v.speed * dt, -HALF + 5, HALF - 5);
+  if (v.kind === 'car') {
+    v.y = terrainHeight(v.x, v.z) + 0.12;
+    v.lift = 0;
+  } else {
+    const vertical = (Input.down('Space') ? 1 : 0) - (Input.down('ControlLeft') || Input.down('ControlRight') ? 1 : 0);
+    v.lift = clamp((v.lift || 0) + vertical * dt * (v.kind === 'plane' ? 13 : 9), 0, v.kind === 'plane' ? 65 : 48);
+    const ground = terrainHeight(v.x, v.z) + 0.12;
+    v.y = Math.max(ground, ground + v.lift);
+    if (v.kind === 'plane' && v.speed < 5) v.lift = Math.max(0, v.lift - dt * 5);
+    v.rotor += dt * (v.kind === 'heli' ? 22 : 0);
+  }
+  e.pos[0] = v.x; e.pos[1] = v.y; e.pos[2] = v.z;
+  e.yaw = v.yaw; e.vel[0] = fx * v.speed; e.vel[2] = fz * v.speed; e.vel[1] = 0;
+  e.grounded = v.kind === 'car' || v.lift <= 0.1;
+}
+function drawVehicles() {
+  for (const v of G.vehicles) {
+    if (!R.inView(v.x, v.z, v.kind === 'plane' ? 5 : 3, 220)) continue;
+    const y = v.y, a = v.yaw;
+    if (v.kind === 'car') {
+      R.box(v.x, y + 0.65, v.z, 2.2, 0.8, 4.1, [0.12, 0.42, 0.82], a);
+      R.box(v.x, y + 1.22, v.z - 0.25, 1.65, 0.75, 1.9, [0.25, 0.72, 0.92], a);
+      for (const side of [-1, 1]) for (const front of [-1, 1]) {
+        const wx = v.x + Math.cos(a) * side * 1.05 + Math.sin(a) * front * 1.35;
+        const wz = v.z - Math.sin(a) * side * 1.05 - Math.cos(a) * front * 1.35;
+        R.push(MESH_CYL, wx, y + 0.38, wz, Math.PI / 2, a, 0.38, 0.22, 0.38, 0.06, 0.06, 0.07, 1);
+      }
+    } else if (v.kind === 'plane') {
+      R.box(v.x, y + 0.35, v.z, 1.05, 0.65, 5.0, [0.82, 0.78, 0.24], a);
+      R.box(v.x, y + 0.38, v.z, 9.0, 0.16, 1.1, [0.82, 0.78, 0.24], a);
+      R.box(v.x, y + 0.85, v.z + 1.8, 3.0, 0.12, 0.55, [0.75, 0.28, 0.18], a);
+    } else {
+      R.box(v.x, y + 0.65, v.z, 2.1, 1.0, 2.8, [0.24, 0.62, 0.42], a);
+      R.box(v.x, y + 0.95, v.z - 0.2, 1.8, 0.72, 1.6, [0.55, 0.82, 0.72], a);
+      R.box(v.x, y + 1.3, v.z, 0.18, 0.12, 11, [0.16, 0.18, 0.2], v.rotor);
+      R.box(v.x, y + 1.3, v.z, 11, 0.12, 0.18, [0.16, 0.18, 0.2], v.rotor);
+      R.box(v.x, y + 0.2, v.z + 1.6, 0.16, 0.16, 2.2, [0.16, 0.18, 0.2], a);
+    }
+  }
+}
+
 function updatePlayer(e, dt) {
   // look — yaw is folded back into (-PI, PI] every frame. Left-turning raises it,
   // so leaving it to accumulate meant it grew without bound over a match, and
@@ -852,6 +955,9 @@ function updatePlayer(e, dt) {
   const wishX = fx * iz + rx * ix, wishZ = fz * iz + rz * ix;
 
   if (G.state === 'drop') { updateSkydive(e, dt, wishX, wishZ, true); return; }
+  if (e.vehicle) { updateVehiclePlayer(e, dt, ix, iz); return; }
+  if (Input.hit('KeyF')) enterVehicle(e);
+  if (e.vehicle) { updateVehiclePlayer(e, dt, ix, iz); return; }
 
   // Sprint is a toggle: tap Shift (or click L3) to start, tap again to stop.
   // Stopping still isn't automatic — standing still while toggled on just walks
@@ -1857,6 +1963,9 @@ function renderScene() {
     if (!R.inView(l.x, l.z, 2, 170)) continue;
     drawLoot(l);
   }
+
+  // drivable cars, planes and helicopters
+  drawVehicles();
 
   // characters (dead ones linger for a few seconds, playing their fall)
   for (const e of G.ents) {
