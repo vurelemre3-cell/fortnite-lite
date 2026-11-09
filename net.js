@@ -305,6 +305,8 @@ const Net = {
       y: r3(e.yaw), pt: r3(e.pitch), g: e.grounded ? 1 : 0, gl: e.glide ? 1 : 0,
       sl: e.slot, inv: this.packInv(e), m: e.mats, bm: e.buildMode ? 1 : 0, ads: e.ads ? 1 : 0,
       up: e.upSeq ? [e.upSeq, e.upName, e.upDur] : 0, mz: e.muzzleT > 0 ? 1 : 0,
+      vh: e.vehicle ? [G.vehicles.indexOf(e.vehicle), r2(e.vehicle.x), r2(e.vehicle.y), r2(e.vehicle.z),
+        r3(e.vehicle.yaw), r1(e.vehicle.speed), r1(e.vehicle.lift), r2(e.vehicle.rotor)] : 0,
     };
   },
 
