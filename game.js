@@ -850,16 +850,23 @@ function createVehicles(pois) {
   return out;
 }
 function nearestVehicle(e, maxDist) {
-  let best = null, bd = maxDist * maxDist;
+  let best = null, bestD = maxDist * maxDist;
+  const fx = -Math.sin(e.yaw), fz = -Math.cos(e.yaw);
   for (const v of G.vehicles) {
     if (v.occupied) continue;
-    const d = dist2(e.pos[0], e.pos[2], v.x, v.z);
-    if (d < bd) { bd = d; best = v; }
+    const dx = v.x - e.pos[0], dz = v.z - e.pos[2];
+    const d = dx * dx + dz * dz;
+    if (d <= 0.001 || d > bestD) continue;
+    // Only target vehicles that are actually in front of the player's view.
+    const facing = (dx * fx + dz * fz) / Math.sqrt(d);
+    if (facing < 0.78) continue;
+    bestD = d;
+    best = v;
   }
   return best;
 }
 function enterVehicle(e) {
-  const v = nearestVehicle(e, 8);
+  const v = nearestVehicle(e, 14);
   if (!v) { say('NO VEHICLE NEARBY'); return; }
   v.occupied = true; v.driver = e; e.vehicle = v; e.vel.fill(0);
   e.yaw = v.yaw; e.buildMode = false; cancelActions(e);
@@ -2478,6 +2485,16 @@ function drawHUD() {
     }
     if (G.elimFlash > 0) drawElimBanner(W, H);
     if (p.alive && G.hurtDirs.length) drawHurtDirs(W, H);
+    if (G.state === 'play' && p.alive && !p.vehicle && nearestVehicle(p, 14)) {
+      hud.save();
+      hud.textAlign = 'center';
+      hud.font = '800 17px system-ui, sans-serif';
+      hud.fillStyle = 'rgba(0,0,0,.68)';
+      hud.fillRect(W / 2 - 112, H - 112, 224, 38);
+      hud.fillStyle = '#fff';
+      hud.fillText('PRESS  F  TO ENTER', W / 2, H - 93);
+      hud.restore();
+    }
   }
 
   if (G.state === 'drop') {
