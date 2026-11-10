@@ -43,8 +43,12 @@ const WEAPONS = {
   heavyAR: { name: 'Heavy Assault Rifle', dmg: 36, rate: 0.17, mag: 25, ammo: 'medium', spread: 0.018, range: 255, reload: 2.45 },
   dmr: { name: 'Marksman Rifle', dmg: 48, rate: 0.48, mag: 12, ammo: 'medium', spread: 0.0045, range: 320, reload: 2.5, scope: true },
   revolver: { name: 'Revolver', dmg: 46, rate: 0.38, mag: 6, ammo: 'light', spread: 0.0095, range: 175, reload: 1.7 },
+  combatAR: { name: 'Combat Assault Rifle', dmg: 29, rate: 0.105, mag: 35, ammo: 'medium', spread: 0.0155, range: 245, reload: 2.2 },
+  strikerSMG: { name: 'Striker SMG', dmg: 15.5, rate: 0.06, mag: 38, ammo: 'light', spread: 0.026, range: 140, reload: 1.95 },
+  drumShotgun: { name: 'Drum Shotgun', dmg: 7.8, pellets: 10, rate: 0.48, mag: 12, ammo: 'shells', spread: 0.066, range: 39, reload: 3.15 },
+  lmg: { name: 'Light Machine Gun', dmg: 19, rate: 0.095, mag: 50, ammo: 'light', spread: 0.033, range: 175, reload: 3.05 },
 };
-const GUN_IDS = ['pistol', 'smg', 'tacsmg', 'ar', 'heavyAR', 'shotgun', 'autoShotgun', 'sniper', 'dmr', 'revolver'];
+const GUN_IDS = ['pistol', 'smg', 'tacsmg', 'strikerSMG', 'ar', 'combatAR', 'heavyAR', 'lmg', 'shotgun', 'autoShotgun', 'drumShotgun', 'sniper', 'dmr', 'revolver'];
 const AMMO_TYPES = ['light', 'medium', 'shells'];
 const AMMO_COLOR = { light: [0.85, 0.80, 0.45], medium: [0.85, 0.55, 0.30], shells: [0.85, 0.35, 0.35] };
 
@@ -69,6 +73,10 @@ const RECOIL = {
   heavyAR: { kick: 0.42 * DEG, max: 1.35 * DEG, jit: 0.16 * DEG, jitMax: 0.52 * DEG, kickT: 0.028, delay: 0.17, rec: 15, frac: 0.90, ads: 0.78, punch: 0.95, bloom: 0.12, bloomMax: 0.42 },
   dmr:     { kick: 1.15 * DEG, max: 1.55 * DEG, jit: 0.15 * DEG, jitMax: 0.32 * DEG, kickT: 0.035, delay: 0.19, rec: 11, frac: 0.92, ads: 0.68, punch: 1.25, bloom: 0, bloomMax: 0 },
   revolver:{ kick: 0.95 * DEG, max: 1.30 * DEG, jit: 0.22 * DEG, jitMax: 0.52 * DEG, kickT: 0.030, delay: 0.15, rec: 10, frac: 0.92, ads: 0.78, punch: 1.05, bloom: 0.03, bloomMax: 0.18 },
+  combatAR:{ kick: 0.31 * DEG, max: 1.18 * DEG, jit: 0.13 * DEG, jitMax: 0.43 * DEG, kickT: 0.024, delay: 0.16, rec: 17, frac: 0.92, ads: 0.74, punch: 0.82, bloom: 0.09, bloomMax: 0.38 },
+  strikerSMG:{ kick: 0.19 * DEG, max: 0.88 * DEG, jit: 0.10 * DEG, jitMax: 0.42 * DEG, kickT: 0.020, delay: 0.14, rec: 18, frac: 0.93, ads: 0.80, punch: 0.52, bloom: 0.075, bloomMax: 0.48 },
+  drumShotgun:{ kick: 0.85 * DEG, max: 1.55 * DEG, jit: 0.19 * DEG, jitMax: 0.48 * DEG, kickT: 0.034, delay: 0.14, rec: 10, frac: 0.94, ads: 0.86, punch: 1.35, bloom: 0, bloomMax: 0 },
+  lmg:{ kick: 0.25 * DEG, max: 1.60 * DEG, jit: 0.16 * DEG, jitMax: 0.58 * DEG, kickT: 0.026, delay: 0.19, rec: 14, frac: 0.90, ads: 0.77, punch: 0.75, bloom: 0.10, bloomMax: 0.56 },
 };
 for (const id in RECOIL) WEAPONS[id].recoil = RECOIL[id];
 
