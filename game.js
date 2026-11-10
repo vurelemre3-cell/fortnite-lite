@@ -954,24 +954,65 @@ function drawVehicles() {
       }
       part(v.x,y+0.08,v.z,0.16,0.22,3.2,[0.18,0.18,0.2]);
     } else {
-      const green=[0.12,0.38,0.24], dark=[0.035,0.06,0.055], canopy=[0.28,0.78,0.82];
-      part(v.x,y+0.72,v.z,2.25,1.05,3.35,green);
-      part(v.x,y+1.12,v.z-0.28,1.95,0.9,1.9,canopy);
-      part(v.x,y+0.72,v.z+2.85,0.22,0.22,3.0,green);
-      part(v.x,y+0.84,v.z+4.15,0.14,0.12,1.8,dark);
-      // main rotor hub, two long blades and a tail rotor
-      part(v.x,y+1.62,v.z,0.34,0.2,0.34,dark,0);
-      part(v.x,y+1.72,v.z,0.18,0.09,13.5,dark,v.rotor);
-      part(v.x,y+1.73,v.z,13.5,0.09,0.18,dark,v.rotor);
-      part(v.x,y+0.28,v.z+1.15,2.5,0.12,0.14,dark);
-      part(v.x+1.18,y+0.78,v.z+4.05,0.12,1.55,0.12,dark,v.rotor*1.6);
-      part(v.x+1.18,y+0.78,v.z+4.05,1.55,0.12,0.12,dark,v.rotor*1.6);
-      // landing skids
-      for (const side of [-1,1]) {
-        part(v.x+rx*side*1.25,y+0.12,v.z,0.13,0.13,3.5,dark);
-        part(v.x+rx*side*1.25,y+0.3,v.z-0.8,0.12,0.55,0.12,dark);
-        part(v.x+rx*side*1.25,y+0.3,v.z+0.8,0.12,0.55,0.12,dark);
+      // Detailed military-style helicopter. Coordinates are local to the airframe:
+      // negative Z is the nose, positive Z is the tail.
+      const olive=[0.16,0.29,0.19], oliveLight=[0.25,0.39,0.25];
+      const dark=[0.035,0.055,0.045], metal=[0.12,0.15,0.13];
+      const glass=[0.08,0.42,0.48], glassLit=[0.18,0.66,0.7];
+      const hp=(lx,ly,lz,w,h,d,col,turn=0)=>{
+        const wx=v.x+rx*lx-fx*lz, wz=v.z+rz*lx-fz*lz;
+        R.box(wx,y+ly,wz,w,h,d,col,a+turn);
+      };
+      // Rounded-looking stepped fuselage and armored lower belly
+      hp(0,0.78,0,2.45,1.05,3.8,olive);
+      hp(0,0.45,-0.05,1.95,0.48,3.35,metal);
+      hp(0,1.18,0.62,1.85,0.58,1.55,oliveLight);
+      // Cockpit nose and broad individual windshield panes
+      hp(0,1.05,-1.78,1.95,0.78,1.25,olive);
+      hp(-0.48,1.42,-1.93,0.78,0.62,0.10,glass,-0.12);
+      hp(0.48,1.42,-1.93,0.78,0.62,0.10,glass,0.12);
+      hp(0,1.48,-1.98,0.10,0.68,0.12,dark);
+      hp(-0.99,1.08,-0.78,0.10,0.72,1.12,glass);
+      hp(0.99,1.08,-0.78,0.10,0.72,1.12,glass);
+      hp(-0.99,1.08,0.52,0.10,0.68,1.0,glass);
+      hp(0.99,1.08,0.52,0.10,0.68,1.0,glass);
+      // Door frames, sliding-door rails and handles
+      for(const side of [-1,1]){
+        hp(side*1.24,0.9,0.45,0.09,1.0,1.55,dark);
+        hp(side*1.27,0.48,0.45,0.08,0.07,1.48,oliveLight);
+        hp(side*1.30,0.92,0.02,0.06,0.07,0.22,[0.72,0.72,0.58]);
+        hp(side*1.29,0.32,-0.9,0.22,0.10,0.62,dark);
+        // landing gear struts and long tubular skids
+        hp(side*1.18,0.18,0.05,0.13,0.58,0.13,metal);
+        hp(side*1.18,0.12,1.02,0.13,0.52,0.13,metal);
+        hp(side*1.42,-0.08,0.42,0.14,0.14,3.65,dark);
+        hp(side*1.42,-0.01,0.42,0.20,0.10,3.55,metal);
+        // small red/green navigation lights
+        hp(side*1.34,1.12,-1.22,0.16,0.13,0.18,side<0?[0.95,0.12,0.08]:[0.12,0.9,0.32]);
       }
+      // Rear boom taper, tail stabilizers and upright fin
+      hp(0,0.91,2.15,0.92,0.72,2.25,olive);
+      hp(0,0.95,3.32,0.48,0.48,2.15,oliveLight);
+      hp(0,1.0,4.48,0.22,0.22,0.28,metal);
+      hp(0,1.12,3.7,3.0,0.12,0.68,olive);
+      hp(0,1.62,4.35,0.16,1.28,0.78,olive);
+      hp(0,2.20,4.38,0.12,0.20,0.56,oliveLight);
+      // Main rotor mast, hub, animated blades and yellow safety tips
+      hp(0,1.72,0.05,0.28,0.76,0.28,metal);
+      hp(0,2.12,0.05,0.72,0.18,0.72,dark);
+      const spin=G.t*22+(v.rotor||0);
+      hp(0,2.23,0.05,14.0,0.12,0.34,dark,spin);
+      hp(0,2.23,0.05,0.34,0.12,14.0,dark,spin);
+      hp(-6.65,2.24,0.05,0.48,0.14,0.42,[0.82,0.72,0.32],spin);
+      hp(6.65,2.24,0.05,0.48,0.14,0.42,[0.82,0.72,0.32],spin);
+      // Tail rotor assembly: vertical two-blade rotor at the fin tip
+      hp(0.30,1.45,4.45,0.62,0.18,0.18,metal);
+      hp(0.58,1.45,4.45,0.14,1.48,0.16,dark,spin*1.7);
+      hp(0.58,1.45,4.45,1.48,0.14,0.16,dark,spin*1.7);
+      // Exhausts and rear lights
+      hp(-0.62,1.62,1.05,0.30,0.28,0.82,metal);
+      hp(0.62,1.62,1.05,0.30,0.28,0.82,metal);
+      hp(0,0.78,5.35,0.22,0.18,0.18,[0.95,0.12,0.08]);
     }
   }
 }
