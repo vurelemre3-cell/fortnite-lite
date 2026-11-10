@@ -114,6 +114,10 @@ const TARGET = {
   sniper:      { peak: 3.4, rec: 0.65, min: 2.0 },
   dmr:         { peak: 2.0, rec: 0.72, min: 0.65 },
   revolver:    { peak: 1.9, rec: 0.62, min: 0.65, fpsTol: 0.25 },
+  combatAR:    { peak: 1.5, rec: 0.48 },
+  strikerSMG:  { peak: 1.3, rec: 0.42 },
+  drumShotgun: { peak: 2.4, rec: 0.95, min: 0.45 },
+  lmg:         { peak: 2.0, rec: 0.62 },
 };
 const FPS = [30, 60, 144];
 console.log('1. trigger held 2 s (or a magazine) at 30 / 60 / 144 fps, no compensation');
