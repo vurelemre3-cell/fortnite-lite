@@ -915,6 +915,10 @@ function updateVehiclePlayer(e, dt, ix, iz) {
   }
   e.pos[0] = v.x; e.pos[1] = v.y; e.pos[2] = v.z;
   e.yaw = v.yaw; e.vel[0] = fx * v.speed; e.vel[2] = fz * v.speed; e.vel[1] = 0;
+  if (v.kind === 'car' && v.lift < 0.5 && Math.abs(v.speed) > 12 && Math.random() < dt * 24) {
+    const px = v.x - fx * 2.05, pz = v.z - fz * 2.05;
+    spawnParticles(px, terrainHeight(px, pz) + 0.16, pz, 2, [0.48, 0.39, 0.27], 1.0, 0.07, 0.32, 5);
+  }
   e.grounded = v.kind === 'car' || v.lift <= 0.1;
 }
 function drawVehicles() {
@@ -922,37 +926,86 @@ function drawVehicles() {
     if (!R.inView(v.x, v.z, v.kind === 'plane' ? 7 : 5, 260)) continue;
     const y = v.y, a = v.yaw;
     const fx = -Math.sin(a), fz = -Math.cos(a), rx = Math.cos(a), rz = -Math.sin(a);
-    const part = (x, yy, z, w, h, d, col, rot = a) => R.box(x, yy, z, w, h, d, col, rot);
+    // Vehicle geometry is built in local coordinates so every detail follows
+    // the chassis rotation instead of drifting when the vehicle turns.
+    const part = (lx, ly, lz, w, h, d, col, turn = 0) => {
+      const wx = v.x + rx * lx - fx * lz, wz = v.z + rz * lx - fz * lz;
+      R.box(wx, y + ly, wz, w, h, d, col, a + turn);
+    };
+    const wheelAt = (lx, lz, rubber, rim) => {
+      const wx = v.x + rx * lx - fx * lz, wz = v.z + rz * lx - fz * lz;
+      R.push(MESH_CYL, wx, y + 0.38, wz, Math.PI / 2, a, 0.44, 0.26, 0.44, 0.035, 0.04, 0.05, 1);
+      R.push(MESH_CYL, wx + rx * Math.sign(lx) * 0.018, y + 0.38, wz + rz * Math.sign(lx) * 0.018,
+        Math.PI / 2, a, 0.23, 0.27, 0.23, rim[0], rim[1], rim[2], 1);
+    };
     if (v.kind === 'car') {
-      const body = [0.08,0.28,0.58], trim = [0.035,0.045,0.06], glass = [0.12,0.72,0.9];
-      part(v.x,y+0.62,v.z,2.55,0.72,4.5,body);
-      part(v.x,y+1.15,v.z-0.22,1.92,0.82,2.25,glass);
-      part(v.x,y+1.57,v.z+1.5,2.3,0.16,0.35,trim);
-      part(v.x,y+0.91,v.z-2.18,2.2,0.2,0.12,[0.95,0.86,0.5]);
-      part(v.x,y+0.88,v.z+2.22,2.15,0.18,0.12,[0.95,0.12,0.08]);
-      for (const side of [-1,1]) for (const front of [-1,1]) {
-        const wx=v.x+rx*side*1.25+fx*front*1.42, wz=v.z+rz*side*1.25+fz*front*1.42;
-        R.push(MESH_CYL,wx,y+0.38,wz,Math.PI/2,a,0.43,0.25,0.43,0.035,0.04,0.05,1);
-        R.push(MESH_CYL,wx+rx*side*0.015,y+0.38,wz+rz*side*0.015,Math.PI/2,a,0.22,0.26,0.22,0.42,0.46,0.5,1);
-      }
-      // glowing headlamps and side mirrors
+      const body = [0.08,0.28,0.58], trim = [0.035,0.045,0.06], glass = [0.12,0.62,0.78];
+      const rubber = [0.035,0.04,0.05], rim = [0.48,0.54,0.6];
+      // Reinforced chassis, hood and trunk.
+      part(0,0.62,0,2.62,0.72,4.55,body);
+      part(0,0.91,-1.58,2.48,0.28,1.35,[0.1,0.34,0.65]);
+      part(0,0.91,1.72,2.4,0.32,0.98,body);
+      part(0,0.36,0,2.38,0.20,3.95,trim);
+      // Cabin, roof and split windows.
+      part(0,1.20,-0.02,1.98,0.82,2.48,glass);
+      part(0,1.64,0.02,2.04,0.13,2.40,trim);
+      part(0,1.25,-1.14,1.86,0.56,0.09,[0.20,0.75,0.88],-0.10);
+      part(0,1.25,1.10,1.86,0.54,0.09,[0.10,0.48,0.62],0.08);
       for (const side of [-1,1]) {
-        part(v.x+rx*side*0.91,y+0.91,v.z-2.23,0.42,0.18,0.08,[1,0.9,0.55]);
-        part(v.x+rx*side*1.35,y+1.12,v.z-0.7,0.22,0.18,0.38,trim);
+        part(side*1.01,1.22,-0.02,0.08,0.55,2.12,[0.14,0.58,0.68]);
+        part(side*1.02,1.28,-1.12,0.13,0.69,0.13,trim);
+        part(side*1.02,1.28,1.10,0.13,0.69,0.13,trim);
+        part(side*1.30,0.88,-0.18,0.12,0.18,0.42,trim);
+        part(side*1.31,0.64,0.68,0.10,0.08,0.82,[0.16,0.42,0.72]);
       }
+      // Bumpers, grille, lamps and tail lights.
+      part(0,0.47,-2.30,2.45,0.23,0.18,trim);
+      part(0,0.54,-2.405,0.75,0.16,0.035,[0.25,0.31,0.38]);
+      part(0,0.45,2.30,2.40,0.22,0.18,trim);
+      for (const side of [-1,1]) {
+        part(side*0.91,0.91,-2.28,0.42,0.20,0.08,[1.0,0.88,0.54]);
+        part(side*0.91,0.89,2.28,0.40,0.19,0.08,[0.95,0.12,0.08]);
+        wheelAt(side*1.30,-1.42,rubber,rim);
+        wheelAt(side*1.30,1.42,rubber,rim);
+      }
+      part(0,0.24,1.75,0.12,0.12,0.48,[0.18,0.19,0.20]);
+      // Roof lights and a small rear spoiler make the vehicle readable at range.
+      part(0,1.78,-0.05,1.55,0.09,0.24,[0.18,0.65,0.92]);
+      part(0,1.25,2.12,2.18,0.10,0.18,trim);
     } else if (v.kind === 'plane') {
-      const paint=[0.82,0.34,0.08], wing=[0.92,0.78,0.35];
-      part(v.x,y+0.45,v.z,1.25,0.72,6.8,paint);
-      part(v.x,y+0.52,v.z-0.05,12.5,0.2,1.55,wing);
-      part(v.x,y+0.78,v.z-0.95,0.86,0.58,1.55,[0.25,0.72,0.9]);
-      part(v.x,y+0.48,v.z+2.65,4.1,0.16,0.8,paint);
-      part(v.x,y+0.85,v.z+2.75,0.18,0.8,0.25,paint);
+      const paint = [0.82,0.34,0.08], wing = [0.92,0.78,0.35], dark = [0.08,0.10,0.13];
+      const canopy = [0.16,0.65,0.82], metal = [0.48,0.54,0.60];
+      // Streamlined fuselage, nose and broad swept wings.
+      part(0,0.48,0,1.25,0.70,7.35,paint);
+      part(0,0.54,-2.62,0.96,0.52,2.05,[0.9,0.43,0.12]);
+      part(0,0.54,0.05,13.4,0.20,1.62,wing);
+      part(0,0.62,0.05,5.2,0.24,1.05,paint);
+      // Cockpit canopy and frame.
+      part(0,0.92,-1.25,0.90,0.68,1.68,canopy);
+      part(0,1.28,-1.22,0.98,0.10,1.55,metal);
+      part(0,0.98,-2.10,0.10,0.58,0.12,dark);
+      // Twin engine nacelles and contrasting tips.
       for (const side of [-1,1]) {
-        const ex=v.x+rx*side*3.5, ez=v.z+fz*0.1;
-        part(ex,y+0.18,ez,0.75,0.55,1.35,[0.22,0.24,0.28]);
-        R.push(MESH_CYL,ex,y+0.18,ez-fz*0.78,0,a,0.48,0.12,0.48,0.12,0.14,0.16,1);
+        part(side*3.35,0.28,-0.08,0.92,0.54,2.05,dark);
+        part(side*3.35,0.28,-0.86,0.72,0.38,0.35,metal);
+        part(side*6.23,0.58,0.05,1.20,0.13,1.60,[0.92,0.18,0.10]);
+        part(side*0.72,0.12,-1.08,0.12,0.45,0.12,metal);
+        part(side*0.95,0.05,-1.08,0.38,0.13,0.42,dark);
       }
-      part(v.x,y+0.08,v.z,0.16,0.22,3.2,[0.18,0.18,0.2]);
+      // Tailplane, fin and stabilizer.
+      part(0,0.58,3.00,4.35,0.16,1.05,paint);
+      part(0,0.98,3.22,0.18,1.08,0.72,paint);
+      part(0,1.52,3.22,0.14,0.15,0.42,wing);
+      // Fixed propeller silhouette and spinner at the nose.
+      part(0,0.50,-3.72,0.16,1.85,0.12,dark);
+      part(0,0.50,-3.73,1.85,0.16,0.12,dark);
+      R.push(MESH_CYL, v.x + fx * 3.78, y + 0.5, v.z + fz * 3.78, Math.PI / 2, a, 0.16, 0.18, 0.16, 0.72, 0.76, 0.82, 1);
+      // Landing gear struts and wheels.
+      for (const side of [-1,1]) {
+        part(side*0.78,0.02,-0.45,0.12,0.50,0.12,metal);
+        const wx=v.x+rx*side*0.78-fx*(-0.45), wz=v.z+rz*side*0.78-fz*(-0.45);
+        R.push(MESH_CYL,wx,y-0.10,wz,Math.PI/2,a,0.22,0.16,0.22,0.035,0.04,0.05,1);
+      }
     } else {
       // Detailed military-style helicopter. Coordinates are local to the airframe:
       // negative Z is the nose, positive Z is the tail.
@@ -1108,7 +1161,7 @@ function updatePlayer(e, dt) {
       if (Input.clicked[0] || padFireHit) startUse(e);
     } else if (it) {
       const w = WEAPONS[it.id];
-      const auto = it.id === 'ar' || it.id === 'smg';
+      const auto = ['ar','heavyAR','combatAR','smg','tacsmg','strikerSMG','lmg','autoShotgun','drumShotgun'].includes(it.id);
       if (auto ? (Input.mouse[0] || padFireHeld) : (Input.clicked[0] || padFireHit)) {
         const aim = playerAimDir(e);
         tryFire(e, aim[0], aim[1], aim[2]);
@@ -1504,8 +1557,8 @@ function autoPickup(e) {
 
 // Bots evaluate their own inventory and select a weapon for the current engagement.
 const BOT_WEAPON_RANGES = {
-  pistol: 30, smg: 24, tacsmg: 28, ar: 58, heavyAR: 72,
-  shotgun: 10, autoShotgun: 13, revolver: 36, dmr: 112, sniper: 155,
+  pistol: 30, smg: 24, tacsmg: 28, strikerSMG: 27, ar: 58, combatAR: 65, heavyAR: 72, lmg: 66,
+  shotgun: 10, autoShotgun: 13, drumShotgun: 12, revolver: 36, dmr: 112, sniper: 155,
 };
 function botWeaponScore(b, item, distance) {
   if (!item || !WEAPONS[item.id] || !WEAPONS[item.id].ammo) return -1e6;
@@ -1599,16 +1652,17 @@ function updateBot(b, dt) {
 
     b.strafeT -= dt;
     if (b.strafeT <= 0) {
-      b.strafeT = rnd(0.55, 1.25) + (1 - b.skill) * 0.35;
+      b.strafeT = rnd(0.85, 1.75) + (1 - b.skill) * 0.45;
       b.strafe = Math.random() < (b.role === 'aggressive' ? 0.64 : 0.5) ? -1 : 1;
     }
     const rx = Math.cos(b.yaw), rz = -Math.sin(b.yaw);
     const fx = -Math.sin(b.yaw), fz = -Math.cos(b.yaw);
     if (visible) {
       const push = clamp((d - want) / Math.max(8, want * 0.72), -1.15, 1.15);
-      const side = (b.role === 'marksman' ? 2.8 : 4.6) + b.skill * 1.6;
-      goX = b.pos[0] + fx * push * 6.4 + rx * b.strafe * side;
-      goZ = b.pos[2] + fz * push * 6.4 + rz * b.strafe * side;
+      const side = (b.role === 'marksman' ? 3.7 : b.role === 'aggressive' ? 5.8 : 4.9) + b.skill * 1.7;
+      const advance = b.role === 'aggressive' ? 7.8 : b.role === 'survivor' ? 5.2 : 6.7;
+      goX = b.pos[0] + fx * push * advance + rx * b.strafe * side;
+      goZ = b.pos[2] + fz * push * advance + rz * b.strafe * side;
 
       // Small lead helps against sprinting targets without giving bots perfect tracking.
       b.aimT -= dt;
@@ -1641,10 +1695,15 @@ function updateBot(b, dt) {
       b.dodgeT = rnd(0.85, 1.4);
     }
 
-    // Build a panic wall sooner, and occasionally a ramp to change the angle.
-    if (b.hp + b.shield < 82 && b.wallT <= 0 && b.mats[b.buildMat] >= BUILD_COST && b.grounded) {
-      b.buildType = Math.random() < 0.72 ? 0 : 2;
-      if (tryBuild(b)) b.wallT = rnd(1.8, 3.6);
+    // Bots use cover before they are one shot, and aggressive roles sometimes
+    // build a ramp to take a new angle instead of endlessly strafing in the open.
+    const underFire = b.hurtT > 0.05 && d < 38;
+    const defending = b.hp + b.shield < 96 || underFire;
+    const pushRamp = visible && b.role === 'aggressive' && d > 17 && d < 48
+      && b.hp > 70 && b.wallT <= 0 && Math.random() < 0.003;
+    if ((defending || pushRamp) && b.wallT <= 0 && b.mats[b.buildMat] >= BUILD_COST && b.grounded) {
+      b.buildType = defending && Math.random() < 0.78 ? 0 : 2;
+      if (tryBuild(b)) b.wallT = defending ? rnd(1.65, 2.9) : rnd(3.8, 5.4);
     }
   } else {
     goX = b.wander[0]; goZ = b.wander[1];
@@ -1703,7 +1762,7 @@ function updateBot(b, dt) {
 }
 
 function botThink(b) {
-  let best = null, bd = 92 * 92;
+  let best = null, bd = 108 * 108;
   for (const e of G.ents) {
     if (e === b || !e.alive || sameTeam(b, e) || e.pos[1] > TERRAIN_MAX + 40) continue;
     if (sameTeam(b, e)) continue;
@@ -1723,7 +1782,7 @@ function botThink(b) {
     ? Math.sqrt(dist2(b.pos[0], b.pos[2], b.target.pos[0], b.target.pos[2])) : 45;
   const slot = botBestWeaponSlot(b, distance);
   if (slot > 0) b.slot = slot;
-  b.lootTarget = findLootTarget(b, 76);
+  b.lootTarget = findLootTarget(b, 92);
   if (b.lootTarget) {
     b.wander[0] = b.lootTarget[0]; b.wander[1] = b.lootTarget[1];
   } else if (!b.wander[0] && !b.wander[1]) botPickWander(b);
@@ -2231,6 +2290,28 @@ const GUN_MODEL = {
     [C, 0, -0.04, 0.08, 0.035, 0.08, 0.10, 'dark'],
     [C, 0, 0.18, -0.09, 0.045, 0.05, 0.15, 'dark'],
   ],
+  combatAR: [
+    [C,0,0.08,0.02,0.14,0.20,0.76,'dark'],[T,0,0.10,-0.77,0.06,0.06,0.62,'metal'],
+    [T,0,0.10,-0.42,0.15,0.15,0.38,'acc'],[C,0,-0.18,-0.02,0.12,0.34,0.18,'acc'],
+    [C,0,-0.12,0.18,0.10,0.24,0.12,'dark'],[C,0,0.06,0.55,0.12,0.20,0.34,'dark'],
+    [T,0,0.28,-0.12,0.11,0.11,0.36,'dark'],[C,0,0.23,-0.12,0.06,0.07,0.22,'acc']
+  ],
+  strikerSMG: [
+    [C,0,0.08,0.02,0.14,0.18,0.55,'dark'],[T,0,0.09,-0.54,0.07,0.07,0.38,'metal'],
+    [C,0,-0.16,-0.02,0.12,0.34,0.20,'acc'],[C,0,-0.11,0.18,0.09,0.23,0.12,'dark'],
+    [C,0,0.06,0.40,0.10,0.16,0.25,'dark'],[T,0,0.08,-0.30,0.15,0.15,0.28,'acc']
+  ],
+  drumShotgun: [
+    [C,0,0.08,0.02,0.16,0.22,0.62,'dark'],[T,0,0.15,-0.70,0.10,0.10,0.86,'metal'],
+    [T,0,0.02,-0.35,0.12,0.12,0.40,'acc'],[C,0,-0.20,-0.05,0.27,0.27,0.30,'acc'],
+    [C,0,-0.12,0.20,0.10,0.22,0.14,'dark'],[C,0,0.04,0.52,0.13,0.21,0.36,'dark']
+  ],
+  lmg: [
+    [C,0,0.08,0.04,0.17,0.24,0.82,'dark'],[T,0,0.10,-0.85,0.075,0.075,0.72,'metal'],
+    [T,0,0.10,-0.45,0.16,0.16,0.42,'acc'],[C,0,-0.22,-0.02,0.17,0.36,0.25,'acc'],
+    [C,0,-0.12,0.20,0.10,0.25,0.13,'dark'],[C,0,0.06,0.60,0.13,0.22,0.38,'dark'],
+    [C,0,0.24,-0.18,0.06,0.09,0.26,'acc']
+  ],
   pickaxe: [
     [C, 0, -0.10, 0.00, 0.06, 1.10, 0.06, 'wood'],   // handle, along Y
     [C, 0, 0.50, 0.00, 0.07, 0.11, 0.62, 'metal'],   // head
@@ -2735,6 +2816,10 @@ function drawItemIcon(id, x, y, w, h, col) {
   else if (id === 'shotgun' || id === 'autoShotgun') { rect(4, 4.5, 10, 2.6); rect(14, 4.6, 6, 2); rect(0, 4.8, 4, 2.6); rect(11, 7, 3, 1.6); if (id === 'autoShotgun') rect(7, 7, 4, 3); }
   else if (id === 'sniper' || id === 'dmr') { rect(3, 5, 10, 2.4); rect(13, 5.4, 7, 1.4); rect(0, 5.2, 3, 2.2); rect(7, 2.6, 5, 1.8); rect(6, 7.4, 2, 3); }
   else if (id === 'revolver') { rect(4, 4, 11, 2.5); rect(8, 6, 4, 3); rect(3, 4.2, 3, 2); rect(15, 4.4, 5, 1.4); rect(6, 7, 3, 4); }
+  else if (id === 'combatAR') { rect(3,4,13,3);rect(8,7,3,4);rect(15,4.5,5,1.5);rect(0,4.5,3,2);rect(8,2.2,5,1.8); }
+  else if (id === 'strikerSMG') { rect(3,4,12,3);rect(6,7,3,4);rect(15,4.5,5,1.5);rect(10,2.5,4,1.5); }
+  else if (id === 'drumShotgun') { rect(3,4,13,3);rect(0,4.5,3,2);rect(9,7,4,4);rect(6,7,6,3);rect(15,4.5,5,1.5); }
+  else if (id === 'lmg') { rect(2,4,15,3.5);rect(8,7,4,4);rect(16,4.5,4,1.5);rect(0,4.5,3,2);rect(5,7.5,6,3); }
   else if (id === 'shield') { rect(8, 4, 4, 7); rect(8.8, 1.5, 2.4, 2.8); hud.fillStyle = '#fff'; rect(8.8, 6, 1, 3); }
   else if (id === 'medkit') { rect(4, 3, 12, 8); hud.fillStyle = '#e33'; rect(9, 4, 2, 6); rect(6.5, 6, 7, 2); }
   hud.restore();
