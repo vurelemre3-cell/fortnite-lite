@@ -664,7 +664,7 @@ function addProp(kind, x, z, opts) {
   World.propById.set(p.id, p);
   if (p.solid) {
     const [rx, rz] = propFootprint(def, model, h, rot);
-    p.col = addCollider({ minx: x - rx, maxx: x + rx, miny: y - 1, maxy: y + h, minz: z - rz, maxz: z + rz, kind: 'prop', ref: p });
+    p.col = addCollider({ minx: x - rx, maxx: x + rx, miny: y - 1, maxy: y + h, minz: z - rz, maxz: z + rz, kind: 'prop', ref: p, walkThrough: kind === 'car' });
   }
   World.props.push(p);
   return p;
@@ -1060,7 +1060,7 @@ function depenetrate(e) {
     let bestD = Infinity, bx = 0, by = 0, bz = 0, any = false;
     const consider = (d, dx, dy, dz) => { if (d < bestD) { bestD = d; bx = dx; by = dy; bz = dz; any = true; } };
     for (const c of _q) {
-      if (c.noclip) continue;
+      if (c.noclip || c.walkThrough) continue;
       let up, under;
       if (c.slope) {
         const h = c.surf(c.ref, p[0], p[2]);
@@ -1124,7 +1124,7 @@ function moveEntity(e, dt) {
     p[axis] += delta;
     queryBoxes(p[0] - ENT_R, p[1], p[2] - ENT_R, p[0] + ENT_R, p[1] + ENT_H, p[2] + ENT_R, _q);
     for (const c of _q) {
-      if (c.noclip) continue;
+      if (c.noclip || c.walkThrough) continue;
       if (c.slope) {
         const h = c.surf(c.ref, p[0], p[2]);
         if (h === null) continue;
