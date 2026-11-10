@@ -351,7 +351,7 @@ console.log('14. a solo match pauses while the mouse is not captured; a lobby ma
 
 console.log('15. new weapon pool contains complete stats, recoil and 3D models');
 {
-  ok(GUN_IDS.length === 10, 'the loot pool contains ten guns');
+  ok(GUN_IDS.length === 14, 'the loot pool contains fourteen guns');
   ok(new Set(GUN_IDS).size === GUN_IDS.length, 'weapon ids are unique');
   for (const id of GUN_IDS) {
     ok(!!WEAPONS[id] && !!WEAPONS[id].ammo && WEAPONS[id].mag > 0 && WEAPONS[id].range > 0, id + ' has complete firing data');
